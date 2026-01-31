@@ -1,0 +1,85 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "go run github.com/steebchen/prisma-client-go"
+  output   = "../internal/database/prisma"
+}
+
+model Monitor {
+  id        String        @id @default(cuid())
+  name      String
+  type      MonitorType
+  target    String
+  interval  Int           @default(60)
+  timeout   Int           @default(30)
+  enabled   Boolean       @default(true)
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  results MonitorResult[]
+  alerts  Alert[]
+
+  @@map("monitors")
+}
+
+model MonitorResult {
+  id         String   @id @default(cuid())
+  monitorId  String   @map("monitor_id")
+  monitor    Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status     Status
+  latency    Int
+  statusCode Int?     @map("status_code")
+  message    String?
+  checkedAt  DateTime @default(now()) @map("checked_at")
+
+  @@index([monitorId, checkedAt])
+  @@map("monitor_results")
+}
+
+model Alert {
+  id        String       @id @default(cuid())
+  monitorId String       @map("monitor_id")
+  monitor   Monitor      @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  channel   AlertChannel
+  target    String
+  enabled   Boolean      @default(true)
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  history AlertHistory[]
+
+  @@map("alerts")
+}
+
+model AlertHistory {
+  id      String   @id @default(cuid())
+  alertId String   @map("alert_id")
+  alert   Alert    @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  status  Status
+  message String
+  sentAt  DateTime @default(now()) @map("sent_at")
+
+  @@index([alertId, sentAt])
+  @@map("alert_history")
+}
+
+enum MonitorType {
+  HTTP
+  PORT
+  PING
+}
+
+enum AlertChannel {
+  EMAIL
+  SMS
+  DISCORD
+  SLACK
+}
+
+enum Status {
+  UP
+  DOWN
+  DEGRADED
+}
