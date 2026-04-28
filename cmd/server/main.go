@@ -9,15 +9,19 @@ import (
 	"syscall"
 	"time"
 
-	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/api"
+	"upguardly-backend/internal/auth"
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/database"
-	"upguardly-backend/internal/scheduler"
 )
 
 func main() {
 	cfg := config.Load()
+
+	if err := auth.Init(cfg.SuperTokens); err != nil {
+		log.Fatalf("Failed to initialize SuperTokens: %v", err)
+	}
+	log.Println("SuperTokens initialized")
 
 	db := database.NewClient()
 	if err := db.Connect(); err != nil {
@@ -27,18 +31,6 @@ func main() {
 
 	log.Println("Connected to database")
 
-	alertManager := alerter.NewManager(cfg)
-
-	sched := scheduler.NewScheduler(db, alertManager)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := sched.Start(ctx); err != nil {
-		log.Fatalf("Failed to start scheduler: %v", err)
-	}
-	log.Println("Scheduler started")
-
 	router := api.NewRouter(db)
 
 	srv := &http.Server{
@@ -47,7 +39,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Server starting on port %s", cfg.Port)
+		log.Printf("API server starting on port %s", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
@@ -58,9 +50,6 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
-
-	cancel()
-	sched.Stop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

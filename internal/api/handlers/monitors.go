@@ -6,11 +6,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"upguardly-backend/internal/auth"
 	db "upguardly-backend/internal/database/prisma"
 	"upguardly-backend/internal/models"
 )
 
 func (h *Handlers) CreateMonitor(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	var req models.CreateMonitorRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -23,6 +30,7 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		db.Monitor.Name.Set(req.Name),
 		db.Monitor.Type.Set(db.MonitorType(req.Type)),
 		db.Monitor.Target.Set(req.Target),
+		db.Monitor.UserID.Set(userID),
 		db.Monitor.Interval.Set(req.Interval),
 		db.Monitor.Timeout.Set(req.Timeout),
 		db.Monitor.Enabled.Set(*req.Enabled),
@@ -37,7 +45,15 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 }
 
 func (h *Handlers) ListMonitors(c *gin.Context) {
-	monitors, err := h.db.Prisma.Monitor.FindMany().Exec(c.Request.Context())
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	monitors, err := h.db.Prisma.Monitor.FindMany(
+		db.Monitor.UserID.Equals(userID),
+	).Exec(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list monitors"})
 		return
@@ -52,6 +68,12 @@ func (h *Handlers) ListMonitors(c *gin.Context) {
 }
 
 func (h *Handlers) GetMonitor(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	id := c.Param("id")
 
 	monitor, err := h.db.Prisma.Monitor.FindUnique(
@@ -63,11 +85,35 @@ func (h *Handlers) GetMonitor(c *gin.Context) {
 		return
 	}
 
+	if monitor.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+
 	c.JSON(http.StatusOK, monitorToResponse(monitor))
 }
 
 func (h *Handlers) UpdateMonitor(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	id := c.Param("id")
+
+	// Verify ownership first
+	existing, err := h.db.Prisma.Monitor.FindUnique(
+		db.Monitor.ID.Equals(id),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if existing.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
 
 	var req models.UpdateMonitorRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -114,9 +160,28 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 }
 
 func (h *Handlers) DeleteMonitor(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	id := c.Param("id")
 
-	_, err := h.db.Prisma.Monitor.FindUnique(
+	// Verify ownership first
+	existing, err := h.db.Prisma.Monitor.FindUnique(
+		db.Monitor.ID.Equals(id),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if existing.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+
+	_, err = h.db.Prisma.Monitor.FindUnique(
 		db.Monitor.ID.Equals(id),
 	).Delete().Exec(c.Request.Context())
 
@@ -129,7 +194,26 @@ func (h *Handlers) DeleteMonitor(c *gin.Context) {
 }
 
 func (h *Handlers) GetMonitorResults(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	id := c.Param("id")
+
+	// Verify ownership first
+	monitor, err := h.db.Prisma.Monitor.FindUnique(
+		db.Monitor.ID.Equals(id),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if monitor.UserID != userID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
 
 	limit := 100
 	if l := c.Query("limit"); l != "" {
@@ -166,6 +250,7 @@ func monitorToResponse(m *db.MonitorModel) *models.Monitor {
 		Interval:  m.Interval,
 		Timeout:   m.Timeout,
 		Enabled:   m.Enabled,
+		UserID:    m.UserID,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}

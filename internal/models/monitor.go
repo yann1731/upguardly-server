@@ -18,6 +18,7 @@ type Monitor struct {
 	Interval  int         `json:"interval"`
 	Timeout   int         `json:"timeout"`
 	Enabled   bool        `json:"enabled"`
+	UserID    string      `json:"userId"`
 	CreatedAt time.Time   `json:"createdAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`
 }
