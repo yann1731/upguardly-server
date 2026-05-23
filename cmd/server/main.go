@@ -11,6 +11,7 @@ import (
 
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/api"
+	"upguardly-backend/internal/auth"
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/database"
 	"upguardly-backend/internal/scheduler"
@@ -18,6 +19,11 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	if err := auth.Init(cfg); err != nil {
+		log.Fatalf("Failed to initialize SuperTokens: %v", err)
+	}
+	log.Println("SuperTokens initialized")
 
 	db := database.NewClient()
 	if err := db.Connect(); err != nil {
@@ -39,7 +45,7 @@ func main() {
 	}
 	log.Println("Scheduler started")
 
-	router := api.NewRouter(db)
+	router := api.NewRouter(db, cfg.SuperTokens.WebsiteDomain)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

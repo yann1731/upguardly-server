@@ -10,6 +10,14 @@ type Config struct {
 	DatabaseURL string
 	SMTP        SMTPConfig
 	Twilio      TwilioConfig
+	SuperTokens SuperTokensConfig
+}
+
+type SuperTokensConfig struct {
+	ConnectionURI string
+	APIKey        string
+	APIDomain     string
+	WebsiteDomain string
 }
 
 type SMTPConfig struct {
@@ -30,6 +38,12 @@ func Load() *Config {
 	return &Config{
 		Port:        getEnv("PORT", "8080"),
 		DatabaseURL: getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/upguardly?sslmode=disable"),
+		SuperTokens: SuperTokensConfig{
+			ConnectionURI: getEnv("SUPERTOKENS_CONNECTION_URI", "http://localhost:3567"),
+			APIKey:        getEnv("SUPERTOKENS_API_KEY", ""),
+			APIDomain:     getEnv("API_DOMAIN", "http://localhost:8080"),
+			WebsiteDomain: getEnv("WEBSITE_DOMAIN", "http://localhost:3000"),
+		},
 		SMTP: SMTPConfig{
 			Host:     getEnv("SMTP_HOST", ""),
 			Port:     getEnvInt("SMTP_PORT", 587),

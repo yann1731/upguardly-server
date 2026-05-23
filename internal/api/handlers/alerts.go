@@ -5,12 +5,28 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"upguardly-backend/internal/api/middleware"
 	db "upguardly-backend/internal/database/prisma"
 	"upguardly-backend/internal/models"
 )
 
 func (h *Handlers) CreateAlert(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	monitorID := c.Param("id")
+
+	_, err := h.db.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(monitorID),
+		db.Monitor.UserID.Equals(userId),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
 
 	var req models.CreateAlertRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -19,15 +35,6 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 	}
 
 	req.SetDefaults()
-
-	_, err := h.db.Prisma.Monitor.FindUnique(
-		db.Monitor.ID.Equals(monitorID),
-	).Exec(c.Request.Context())
-
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
-		return
-	}
 
 	alert, err := h.db.Prisma.Alert.CreateOne(
 		db.Alert.Monitor.Link(db.Monitor.ID.Equals(monitorID)),
@@ -45,7 +52,22 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 }
 
 func (h *Handlers) ListAlerts(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	monitorID := c.Param("id")
+
+	_, err := h.db.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(monitorID),
+		db.Monitor.UserID.Equals(userId),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
 
 	alerts, err := h.db.Prisma.Alert.FindMany(
 		db.Alert.MonitorID.Equals(monitorID),
@@ -65,7 +87,30 @@ func (h *Handlers) ListAlerts(c *gin.Context) {
 }
 
 func (h *Handlers) UpdateAlert(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
 	id := c.Param("id")
+
+	alert, err := h.db.Prisma.Alert.FindUnique(
+		db.Alert.ID.Equals(id),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		return
+	}
+
+	_, err = h.db.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(alert.MonitorID),
+		db.Monitor.UserID.Equals(userId),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		return
+	}
 
 	var req models.UpdateAlertRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -90,27 +135,50 @@ func (h *Handlers) UpdateAlert(c *gin.Context) {
 		return
 	}
 
-	alert, err := h.db.Prisma.Alert.FindUnique(
+	updated, err := h.db.Prisma.Alert.FindUnique(
 		db.Alert.ID.Equals(id),
 	).Update(updates...).Exec(c.Request.Context())
 
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update alert"})
+		return
+	}
+
+	c.JSON(http.StatusOK, alertToResponse(updated))
+}
+
+func (h *Handlers) DeleteAlert(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	id := c.Param("id")
+
+	alert, err := h.db.Prisma.Alert.FindUnique(
+		db.Alert.ID.Equals(id),
+	).Exec(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
 		return
 	}
 
-	c.JSON(http.StatusOK, alertToResponse(alert))
-}
+	_, err = h.db.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(alert.MonitorID),
+		db.Monitor.UserID.Equals(userId),
+	).Exec(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		return
+	}
 
-func (h *Handlers) DeleteAlert(c *gin.Context) {
-	id := c.Param("id")
-
-	_, err := h.db.Prisma.Alert.FindUnique(
+	_, err = h.db.Prisma.Alert.FindUnique(
 		db.Alert.ID.Equals(id),
 	).Delete().Exec(c.Request.Context())
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete alert"})
 		return
 	}
 

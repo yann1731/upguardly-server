@@ -1,16 +1,34 @@
 package api
 
 import (
+	"net/http"
+
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/supertokens/supertokens-golang/supertokens"
 
 	"upguardly-backend/internal/api/handlers"
+	"upguardly-backend/internal/api/middleware"
 	"upguardly-backend/internal/database"
 )
 
-func NewRouter(db *database.Client) *gin.Engine {
+func NewRouter(db *database.Client, websiteDomain string) *gin.Engine {
 	router := gin.Default()
 
 	router.Use(gin.Recovery())
+
+	router.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{websiteDomain},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     append([]string{"content-type"}, supertokens.GetAllCORSHeaders()...),
+		AllowCredentials: true,
+	}))
+
+	router.Use(func(c *gin.Context) {
+		supertokens.Middleware(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			c.Next()
+		})).ServeHTTP(c.Writer, c.Request)
+	})
 
 	h := handlers.NewHandlers(db)
 
@@ -18,23 +36,27 @@ func NewRouter(db *database.Client) *gin.Engine {
 	{
 		v1.GET("/health", h.Health)
 
-		monitors := v1.Group("/monitors")
+		protected := v1.Group("")
+		protected.Use(middleware.AuthRequired())
 		{
-			monitors.POST("", h.CreateMonitor)
-			monitors.GET("", h.ListMonitors)
-			monitors.GET("/:id", h.GetMonitor)
-			monitors.PUT("/:id", h.UpdateMonitor)
-			monitors.DELETE("/:id", h.DeleteMonitor)
-			monitors.GET("/:id/results", h.GetMonitorResults)
+			monitors := protected.Group("/monitors")
+			{
+				monitors.POST("", h.CreateMonitor)
+				monitors.GET("", h.ListMonitors)
+				monitors.GET("/:id", h.GetMonitor)
+				monitors.PUT("/:id", h.UpdateMonitor)
+				monitors.DELETE("/:id", h.DeleteMonitor)
+				monitors.GET("/:id/results", h.GetMonitorResults)
 
-			monitors.POST("/:id/alerts", h.CreateAlert)
-			monitors.GET("/:id/alerts", h.ListAlerts)
-		}
+				monitors.POST("/:id/alerts", h.CreateAlert)
+				monitors.GET("/:id/alerts", h.ListAlerts)
+			}
 
-		alerts := v1.Group("/alerts")
-		{
-			alerts.PUT("/:id", h.UpdateAlert)
-			alerts.DELETE("/:id", h.DeleteAlert)
+			alerts := protected.Group("/alerts")
+			{
+				alerts.PUT("/:id", h.UpdateAlert)
+				alerts.DELETE("/:id", h.DeleteAlert)
+			}
 		}
 	}
 

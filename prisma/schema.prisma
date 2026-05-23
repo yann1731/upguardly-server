@@ -10,6 +10,7 @@ generator client {
 
 model Monitor {
   id        String        @id @default(cuid())
+  userId    String        @map("user_id")
   name      String
   type      MonitorType
   target    String
@@ -22,6 +23,7 @@ model Monitor {
   results MonitorResult[]
   alerts  Alert[]
 
+  @@index([userId])
   @@map("monitors")
 }
 
