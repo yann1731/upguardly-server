@@ -1,15 +1,11 @@
 package handlers
 
-import (
-	"upguardly-backend/internal/database"
-)
+import "upguardly-backend/internal/models"
 
 type Handlers struct {
-	db *database.Client
+	store models.Store
 }
 
-func NewHandlers(db *database.Client) *Handlers {
-	return &Handlers{
-		db: db,
-	}
+func NewHandlers(store models.Store) *Handlers {
+	return &Handlers{store: store}
 }

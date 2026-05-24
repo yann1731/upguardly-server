@@ -9,10 +9,10 @@ import (
 
 	"upguardly-backend/internal/api/handlers"
 	"upguardly-backend/internal/api/middleware"
-	"upguardly-backend/internal/database"
+	"upguardly-backend/internal/models"
 )
 
-func NewRouter(db *database.Client, websiteDomain string) *gin.Engine {
+func NewRouter(store models.Store, websiteDomain string) *gin.Engine {
 	router := gin.Default()
 
 	router.Use(gin.Recovery())
@@ -30,7 +30,7 @@ func NewRouter(db *database.Client, websiteDomain string) *gin.Engine {
 		})).ServeHTTP(c.Writer, c.Request)
 	})
 
-	h := handlers.NewHandlers(db)
+	h := handlers.NewHandlers(store)
 
 	v1 := router.Group("/v1")
 	{

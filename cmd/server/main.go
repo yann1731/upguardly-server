@@ -45,7 +45,8 @@ func main() {
 	}
 	log.Println("Scheduler started")
 
-	router := api.NewRouter(db, cfg.SuperTokens.WebsiteDomain)
+	store := database.NewPrismaStore(db)
+	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

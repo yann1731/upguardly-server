@@ -6,7 +6,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"upguardly-backend/internal/api/middleware"
-	db "upguardly-backend/internal/database/prisma"
 	"upguardly-backend/internal/models"
 )
 
@@ -19,36 +18,24 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 
 	monitorID := c.Param("id")
 
-	_, err := h.db.Prisma.Monitor.FindFirst(
-		db.Monitor.ID.Equals(monitorID),
-		db.Monitor.UserID.Equals(userId),
-	).Exec(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
-		return
-	}
-
 	var req models.CreateAlertRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
 	req.SetDefaults()
 
-	alert, err := h.db.Prisma.Alert.CreateOne(
-		db.Alert.Monitor.Link(db.Monitor.ID.Equals(monitorID)),
-		db.Alert.Channel.Set(db.AlertChannel(req.Channel)),
-		db.Alert.Target.Set(req.Target),
-		db.Alert.Enabled.Set(*req.Enabled),
-	).Exec(c.Request.Context())
-
+	alert, err := h.store.CreateAlert(c.Request.Context(), monitorID, userId, string(req.Channel), req.Target, *req.Enabled)
 	if err != nil {
+		if isNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create alert"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, alertToResponse(alert))
+	c.JSON(http.StatusCreated, alert)
 }
 
 func (h *Handlers) ListAlerts(c *gin.Context) {
@@ -60,30 +47,17 @@ func (h *Handlers) ListAlerts(c *gin.Context) {
 
 	monitorID := c.Param("id")
 
-	_, err := h.db.Prisma.Monitor.FindFirst(
-		db.Monitor.ID.Equals(monitorID),
-		db.Monitor.UserID.Equals(userId),
-	).Exec(c.Request.Context())
+	alerts, err := h.store.ListAlerts(c.Request.Context(), monitorID, userId)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
-		return
-	}
-
-	alerts, err := h.db.Prisma.Alert.FindMany(
-		db.Alert.MonitorID.Equals(monitorID),
-	).Exec(c.Request.Context())
-
-	if err != nil {
+		if isNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list alerts"})
 		return
 	}
 
-	response := make([]models.Alert, len(alerts))
-	for i, a := range alerts {
-		response[i] = *alertToResponse(&a)
-	}
-
-	c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, alerts)
 }
 
 func (h *Handlers) UpdateAlert(c *gin.Context) {
@@ -95,56 +69,35 @@ func (h *Handlers) UpdateAlert(c *gin.Context) {
 
 	id := c.Param("id")
 
-	alert, err := h.db.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Exec(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
-		return
-	}
-
-	_, err = h.db.Prisma.Monitor.FindFirst(
-		db.Monitor.ID.Equals(alert.MonitorID),
-		db.Monitor.UserID.Equals(userId),
-	).Exec(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
-		return
-	}
-
 	var req models.UpdateAlertRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	var updates []db.AlertSetParam
-
-	if req.Channel != nil {
-		updates = append(updates, db.Alert.Channel.Set(db.AlertChannel(*req.Channel)))
-	}
-	if req.Target != nil {
-		updates = append(updates, db.Alert.Target.Set(*req.Target))
-	}
-	if req.Enabled != nil {
-		updates = append(updates, db.Alert.Enabled.Set(*req.Enabled))
-	}
-
-	if len(updates) == 0 {
+	if req.Channel == nil && req.Target == nil && req.Enabled == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
 		return
 	}
 
-	updated, err := h.db.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Update(updates...).Exec(c.Request.Context())
+	alert, err := h.store.GetAlert(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		return
+	}
 
+	if _, err := h.store.GetMonitor(c.Request.Context(), alert.MonitorID, userId); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
+		return
+	}
+
+	updated, err := h.store.UpdateAlert(c.Request.Context(), id, req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update alert"})
 		return
 	}
 
-	c.JSON(http.StatusOK, alertToResponse(updated))
+	c.JSON(http.StatusOK, updated)
 }
 
 func (h *Handlers) DeleteAlert(c *gin.Context) {
@@ -156,28 +109,18 @@ func (h *Handlers) DeleteAlert(c *gin.Context) {
 
 	id := c.Param("id")
 
-	alert, err := h.db.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Exec(c.Request.Context())
+	alert, err := h.store.GetAlert(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
 		return
 	}
 
-	_, err = h.db.Prisma.Monitor.FindFirst(
-		db.Monitor.ID.Equals(alert.MonitorID),
-		db.Monitor.UserID.Equals(userId),
-	).Exec(c.Request.Context())
-	if err != nil {
+	if _, err := h.store.GetMonitor(c.Request.Context(), alert.MonitorID, userId); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
 		return
 	}
 
-	_, err = h.db.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Delete().Exec(c.Request.Context())
-
-	if err != nil {
+	if err := h.store.DeleteAlert(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete alert"})
 		return
 	}
@@ -185,13 +128,6 @@ func (h *Handlers) DeleteAlert(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
-func alertToResponse(a *db.AlertModel) *models.Alert {
-	return &models.Alert{
-		ID:        a.ID,
-		MonitorID: a.MonitorID,
-		Channel:   models.AlertChannel(a.Channel),
-		Target:    a.Target,
-		Enabled:   a.Enabled,
-		CreatedAt: a.CreatedAt,
-	}
+func isNotFound(err error) bool {
+	return err == models.ErrNotFound
 }
