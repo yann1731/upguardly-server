@@ -20,10 +20,10 @@ func NewPrismaStore(client *Client) *PrismaStore {
 
 func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, name, monitorType, target string, interval, timeout int, enabled bool) (*models.Monitor, error) {
 	m, err := s.client.Prisma.Monitor.CreateOne(
+		db.Monitor.UserID.Set(userId),
 		db.Monitor.Name.Set(name),
 		db.Monitor.Type.Set(db.MonitorType(monitorType)),
 		db.Monitor.Target.Set(target),
-		db.Monitor.UserID.Set(userId),
 		db.Monitor.Interval.Set(interval),
 		db.Monitor.Timeout.Set(timeout),
 		db.Monitor.Enabled.Set(enabled),
