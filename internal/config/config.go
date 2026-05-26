@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
@@ -11,6 +12,24 @@ type Config struct {
 	SMTP        SMTPConfig
 	Twilio      TwilioConfig
 	SuperTokens SuperTokensConfig
+	Etcd        EtcdConfig
+	Scheduler   SchedulerConfig
+}
+
+type SchedulerConfig struct {
+	InstanceID     string
+	PartitionCount int
+	SQLitePath     string
+	LeaseTTL       time.Duration
+	SyncInterval   time.Duration
+	Etcd           EtcdConfig
+}
+
+type EtcdConfig struct {
+	Endpoints   []string
+	DialTimeout time.Duration
+	Username    string
+	Password    string
 }
 
 type SuperTokensConfig struct {
@@ -55,6 +74,25 @@ func Load() *Config {
 			AccountSID: getEnv("TWILIO_SID", ""),
 			AuthToken:  getEnv("TWILIO_TOKEN", ""),
 			FromNumber: getEnv("TWILIO_FROM", ""),
+		},
+		Etcd: EtcdConfig{
+			Endpoints:   []string{getEnv("ETCD_ENDPOINT", "http://localhost:2379")},
+			DialTimeout: time.Duration(getEnvInt("ETCD_DIAL_TIMEOUT_SECONDS", 5)) * time.Second,
+			Username:    getEnv("ETCD_USERNAME", ""),
+			Password:    getEnv("ETCD_PASSWORD", ""),
+		},
+		Scheduler: SchedulerConfig{
+			InstanceID:     getEnv("SCHEDULER_INSTANCE_ID", "scheduler-0"),
+			PartitionCount: getEnvInt("SCHEDULER_PARTITION_COUNT", 1),
+			SQLitePath:     getEnv("SCHEDULER_SQLITE_PATH", "/tmp/upguardly-scheduler.db"),
+			LeaseTTL:       time.Duration(getEnvInt("SCHEDULER_LEASE_TTL_SECONDS", 30)) * time.Second,
+			SyncInterval:   time.Duration(getEnvInt("SCHEDULER_SYNC_INTERVAL_SECONDS", 10)) * time.Second,
+			Etcd: EtcdConfig{
+				Endpoints:   []string{getEnv("ETCD_ENDPOINT", "http://localhost:2379")},
+				DialTimeout: time.Duration(getEnvInt("ETCD_DIAL_TIMEOUT_SECONDS", 5)) * time.Second,
+				Username:    getEnv("ETCD_USERNAME", ""),
+				Password:    getEnv("ETCD_PASSWORD", ""),
+			},
 		},
 	}
 }
