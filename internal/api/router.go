@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/supertokens/supertokens-golang/supertokens"
 
 	"upguardly-backend/internal/api/handlers"
@@ -16,6 +17,9 @@ func NewRouter(store models.Store, websiteDomain string) *gin.Engine {
 	router := gin.Default()
 
 	router.Use(gin.Recovery())
+	router.Use(middleware.MetricsMiddleware())
+
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{websiteDomain},

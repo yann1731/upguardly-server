@@ -9,6 +9,7 @@ import (
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/database"
 	db "upguardly-backend/internal/database/prisma"
+	"upguardly-backend/internal/metrics"
 	"upguardly-backend/internal/models"
 	"upguardly-backend/internal/monitor"
 )
@@ -128,6 +129,10 @@ func (s *Scheduler) runCheck(ctx context.Context, m *db.MonitorModel) {
 	timeout := time.Duration(m.Timeout) * time.Second
 	result := checker.Check(ctx, m.Target, timeout)
 
+	metrics.MonitorChecksTotal.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status)).Inc()
+	metrics.MonitorCheckLatencyMs.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status)).Observe(float64(result.Latency))
+	metrics.MonitorStatus.WithLabelValues(m.ID, m.Name, string(m.Type)).Set(metrics.StatusToGaugeValue(result.Status))
+
 	s.saveResult(ctx, m.ID, &result)
 
 	s.mu.RLock()
@@ -192,6 +197,7 @@ func (s *Scheduler) sendAlerts(ctx context.Context, m *db.MonitorModel, result *
 			log.Printf("Failed to send %s alert: %v", alert.Channel, err)
 		} else {
 			log.Printf("Sent %s alert for %s", alert.Channel, m.Name)
+			metrics.AlertsSentTotal.WithLabelValues(m.ID, m.Name, string(alert.Channel), string(result.Status)).Inc()
 		}
 
 		s.saveAlertHistory(ctx, alert.ID, result)
