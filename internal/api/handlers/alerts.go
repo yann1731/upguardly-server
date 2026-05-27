@@ -1,13 +1,72 @@
 package handlers
 
 import (
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 
 	"upguardly-backend/internal/api/middleware"
 	"upguardly-backend/internal/models"
 )
+
+// e164Regexp validates E.164 international phone numbers.
+var e164Regexp = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
+
+// validateAlertTarget checks that the alert destination is valid and safe.
+// For webhook channels (DISCORD, SLACK) it also prevents SSRF by rejecting
+// URLs that point to private or reserved IP ranges.
+func validateAlertTarget(channel models.AlertChannel, target string) error {
+	switch channel {
+	case models.AlertChannelEMAIL:
+		// binding:"email" already validated format upstream; nothing extra needed.
+		return nil
+
+	case models.AlertChannelSMS:
+		if !e164Regexp.MatchString(target) {
+			return fmt.Errorf("invalid SMS target: must be an E.164 phone number (e.g. +12125551234)")
+		}
+		return nil
+
+	case models.AlertChannelDISCORD, models.AlertChannelSLACK:
+		u, err := url.Parse(target)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("invalid webhook URL: must be a valid absolute URL")
+		}
+		if u.Scheme != "https" {
+			return fmt.Errorf("invalid webhook URL: only HTTPS webhooks are allowed")
+		}
+		// Extract the plain hostname (strip port if present).
+		host := u.Hostname()
+		// Block literal private IPs.
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return fmt.Errorf("invalid webhook URL: private IP addresses are not allowed")
+			}
+			return nil
+		}
+		// Resolve and validate every address the hostname maps to.
+		addrs, err := net.LookupHost(host)
+		if err != nil {
+			return fmt.Errorf("invalid webhook URL: hostname could not be resolved")
+		}
+		for _, addr := range addrs {
+			ip := net.ParseIP(addr)
+			if ip == nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return fmt.Errorf("invalid webhook URL: hostname resolves to a private or reserved IP address")
+			}
+		}
+		return nil
+	}
+
+	return nil
+}
 
 func (h *Handlers) CreateAlert(c *gin.Context) {
 	userId, ok := middleware.GetUserID(c)
@@ -24,6 +83,11 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 		return
 	}
 	req.SetDefaults()
+
+	if err := validateAlertTarget(req.Channel, req.Target); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	alert, err := h.store.CreateAlert(c.Request.Context(), monitorID, userId, string(req.Channel), req.Target, *req.Enabled)
 	if err != nil {
@@ -89,6 +153,22 @@ func (h *Handlers) UpdateAlert(c *gin.Context) {
 	if _, err := h.store.GetMonitor(c.Request.Context(), alert.MonitorID, userId); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
 		return
+	}
+
+	// Validate the new target if either channel or target is being changed.
+	if req.Target != nil || req.Channel != nil {
+		effectiveChannel := alert.Channel
+		if req.Channel != nil {
+			effectiveChannel = *req.Channel
+		}
+		effectiveTarget := alert.Target
+		if req.Target != nil {
+			effectiveTarget = *req.Target
+		}
+		if err := validateAlertTarget(effectiveChannel, effectiveTarget); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	updated, err := h.store.UpdateAlert(c.Request.Context(), id, req)

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -29,32 +30,50 @@ func (h *Handlers) CreateInvitation(c *gin.Context) {
 		return
 	}
 
-	token, err := generateToken()
+	// Prevent duplicate pending invitations for the same email in this org.
+	existing, _ := h.store.ListInvitations(c.Request.Context(), orgId)
+	for _, inv := range existing {
+		if inv.Email == req.Email && inv.Status == "PENDING" {
+			c.JSON(http.StatusConflict, gin.H{"error": "A pending invitation already exists for this email address"})
+			return
+		}
+	}
+
+	rawToken, err := generateToken()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate invitation token"})
 		return
 	}
 
+	// Store the SHA-256 hash of the token, not the raw token.
+	// The raw token is only ever sent to the invitee via email; the DB stores
+	// the hash so that a DB leak does not expose usable invitation links.
+	tokenHash := hashToken(rawToken)
+
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	inv, err := h.store.CreateInvitation(c.Request.Context(), orgId, req.Email, callerId, req.Role, token, expiresAt)
+	inv, err := h.store.CreateInvitation(c.Request.Context(), orgId, req.Email, callerId, req.Role, tokenHash, expiresAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create invitation"})
 		return
 	}
 
-	// Send invitation email (non-blocking failure — log but don't fail the request)
+	// Send invitation email (non-blocking failure — log but don't fail the request).
 	org, _ := h.store.GetOrganization(c.Request.Context(), orgId)
 	if org != nil && h.mailer != nil {
 		websiteDomain := os.Getenv("WEBSITE_DOMAIN")
 		if websiteDomain == "" {
-			websiteDomain = "http://localhost:3000"
+			// Log the misconfiguration but don't silently send broken links.
+			_ = fmt.Errorf("WEBSITE_DOMAIN is not set; invitation email will not be sent")
+		} else {
+			acceptURL := fmt.Sprintf("%s/invitations/%s", websiteDomain, rawToken)
+			_ = h.mailer.SendInvitation(req.Email, org.Name, callerId, acceptURL)
 		}
-		acceptURL := fmt.Sprintf("%s/invitations/%s", websiteDomain, token)
-		_ = h.mailer.SendInvitation(req.Email, org.Name, callerId, acceptURL)
 	}
 
-	// Never expose the token in list responses; only return it on creation
+	// Return the raw token on creation so the caller can share it directly if
+	// needed (e.g., in tests). Never exposed again after this response.
+	inv.Token = rawToken
 	c.JSON(http.StatusCreated, inv)
 }
 
@@ -71,7 +90,7 @@ func (h *Handlers) ListInvitations(c *gin.Context) {
 		return
 	}
 
-	// Strip token from list response
+	// Strip token from list response — the hash must never be returned.
 	for i := range invs {
 		invs[i].Token = ""
 	}
@@ -110,9 +129,12 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 		return
 	}
 
-	token := c.Param("token")
+	rawToken := c.Param("token")
 
-	inv, err := h.store.GetInvitationByToken(c.Request.Context(), token)
+	// The DB stores a SHA-256 hash of the token; hash before lookup.
+	tokenHash := hashToken(rawToken)
+
+	inv, err := h.store.GetInvitationByToken(c.Request.Context(), tokenHash)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
 		return
@@ -128,7 +150,7 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 		return
 	}
 
-	member, err := h.store.AcceptInvitation(c.Request.Context(), token, userId)
+	member, err := h.store.AcceptInvitation(c.Request.Context(), tokenHash, userId)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
 		return
@@ -137,10 +159,19 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 	c.JSON(http.StatusOK, member)
 }
 
+// generateToken creates a cryptographically secure random 32-byte token
+// returned as a lowercase hex string (64 characters).
 func generateToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// hashToken computes the SHA-256 hash of a token and returns it as a
+// lowercase hex string. This is used to store tokens securely in the DB.
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
 }

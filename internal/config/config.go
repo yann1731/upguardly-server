@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -62,7 +63,7 @@ type StripeConfig struct {
 }
 
 func Load() *Config {
-	return &Config{
+	cfg := &Config{
 		Port:        getEnv("PORT", "8080"),
 		DatabaseURL: getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/upguardly?sslmode=disable"),
 		SuperTokens: SuperTokensConfig{
@@ -108,6 +109,38 @@ func Load() *Config {
 				Password:    getEnv("ETCD_PASSWORD", ""),
 			},
 		},
+	}
+
+	cfg.warnMissingSecrets()
+	return cfg
+}
+
+// warnMissingSecrets logs warnings for configuration that is required in
+// production but not set. These are non-fatal at startup so that local
+// development still works without every service configured, but the warnings
+// make misconfigurations visible before they cause silent failures.
+func (c *Config) warnMissingSecrets() {
+	isLocalDefault := func(url string) bool {
+		return url == "postgresql://postgres:postgres@localhost:5432/upguardly?sslmode=disable"
+	}
+
+	if isLocalDefault(c.DatabaseURL) {
+		log.Println("[WARN] config: DATABASE_URL is using the insecure default — set DATABASE_URL in production")
+	}
+	if c.SuperTokens.APIKey == "" {
+		log.Println("[WARN] config: SUPERTOKENS_API_KEY is not set — SuperTokens API may be unprotected")
+	}
+	if c.Stripe.SecretKey == "" {
+		log.Println("[WARN] config: STRIPE_SECRET_KEY is not set — billing features will be unavailable")
+	}
+	if c.Stripe.WebhookSecret == "" {
+		log.Println("[WARN] config: STRIPE_WEBHOOK_SECRET is not set — Stripe webhooks cannot be verified")
+	}
+	if os.Getenv("METRICS_TOKEN") == "" {
+		log.Println("[WARN] config: METRICS_TOKEN is not set — /metrics endpoint is publicly accessible")
+	}
+	if c.SuperTokens.WebsiteDomain == "http://localhost:3000" && os.Getenv("WEBSITE_DOMAIN") == "" {
+		log.Println("[WARN] config: WEBSITE_DOMAIN is not set — invitation emails will link to localhost")
 	}
 }
 

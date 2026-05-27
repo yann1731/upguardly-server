@@ -2,9 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,8 +47,27 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		return
 	}
 
-	var req models.CreateCheckoutRequest
+	// Only accept the plan name from the client; build redirect URLs server-side
+	// from the trusted WEBSITE_DOMAIN to prevent open-redirect attacks.
+	type checkoutReq struct {
+		Plan string `json:"plan" binding:"required,oneof=PRO ENTERPRISE"`
+		// SuccessPath and CancelPath must be relative paths (no host/scheme).
+		SuccessPath string `json:"successPath"`
+		CancelPath  string `json:"cancelPath"`
+	}
+	var req checkoutReq
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	websiteDomain := os.Getenv("WEBSITE_DOMAIN")
+	if websiteDomain == "" {
+		websiteDomain = "http://localhost:3000"
+	}
+
+	successURL, cancelURL, err := buildRedirectURLs(websiteDomain, req.SuccessPath, req.CancelPath, orgId)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -67,13 +90,13 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		return
 	}
 
-	url, err := h.stripe.CreateCheckoutSession(customerID, priceID, req.SuccessURL, req.CancelURL)
+	redirectURL, err := h.stripe.CreateCheckoutSession(customerID, priceID, successURL, cancelURL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create checkout session"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"url": url})
+	c.JSON(http.StatusOK, gin.H{"url": redirectURL})
 }
 
 func (h *Handlers) CreatePortal(c *gin.Context) {
@@ -88,11 +111,23 @@ func (h *Handlers) CreatePortal(c *gin.Context) {
 		return
 	}
 
+	// Accept only a relative return path; build the absolute URL server-side.
 	type portalReq struct {
-		ReturnURL string `json:"returnUrl" binding:"required,url"`
+		ReturnPath string `json:"returnPath"`
 	}
 	var req portalReq
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	websiteDomain := os.Getenv("WEBSITE_DOMAIN")
+	if websiteDomain == "" {
+		websiteDomain = "http://localhost:3000"
+	}
+
+	returnURL, err := buildSingleRedirectURL(websiteDomain, req.ReturnPath)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -103,13 +138,53 @@ func (h *Handlers) CreatePortal(c *gin.Context) {
 		return
 	}
 
-	url, err := h.stripe.CreatePortalSession(*sub.StripeCustomerID, req.ReturnURL)
+	redirectURL, err := h.stripe.CreatePortalSession(*sub.StripeCustomerID, returnURL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create portal session"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"url": url})
+	c.JSON(http.StatusOK, gin.H{"url": redirectURL})
+}
+
+// buildRedirectURLs constructs absolute success and cancel URLs by combining the
+// trusted websiteDomain with relative paths provided by the client. Relative paths
+// must start with "/" and must not contain scheme or host components.
+func buildRedirectURLs(websiteDomain, successPath, cancelPath, orgId string) (string, string, error) {
+	// Default fallback paths if client didn't provide them.
+	if successPath == "" {
+		successPath = fmt.Sprintf("/organizations/%s", orgId)
+	}
+	if cancelPath == "" {
+		cancelPath = fmt.Sprintf("/organizations/%s", orgId)
+	}
+
+	successURL, err := buildSingleRedirectURL(websiteDomain, successPath)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid successPath: %w", err)
+	}
+	cancelURL, err := buildSingleRedirectURL(websiteDomain, cancelPath)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid cancelPath: %w", err)
+	}
+	return successURL, cancelURL, nil
+}
+
+func buildSingleRedirectURL(websiteDomain, path string) (string, error) {
+	if path == "" {
+		return websiteDomain, nil
+	}
+	// Path must be relative (start with "/" and not contain "://").
+	if strings.Contains(path, "://") || !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("redirect path must be a relative path starting with /")
+	}
+	// Validate by parsing the combined URL.
+	combined := strings.TrimRight(websiteDomain, "/") + path
+	u, err := url.Parse(combined)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("could not build a valid redirect URL")
+	}
+	return combined, nil
 }
 
 // StripeWebhook handles incoming Stripe webhook events.
@@ -168,9 +243,14 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		priceID = sub.Items.Data[0].Price.ID
 	}
 
-	plan := h.planFromPriceID(priceID)
+	plan, err := h.planFromPriceID(priceID)
+	if err != nil {
+		log.Printf("stripe webhook: unrecognised price ID %q for org %s — ignoring event", priceID, orgID)
+		c.JSON(http.StatusOK, gin.H{"received": true})
+		return
+	}
 
-	_, err := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+	_, upsertErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
 		OrgID:                orgID,
 		Plan:                 plan,
 		Status:               status,
@@ -180,8 +260,8 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		CurrentPeriodStart:   &start,
 		CurrentPeriodEnd:     &end,
 	})
-	if err != nil {
-		log.Printf("stripe webhook: failed to upsert subscription for org %s: %v", orgID, err)
+	if upsertErr != nil {
+		log.Printf("stripe webhook: failed to upsert subscription for org %s: %v", orgID, upsertErr)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"received": true})
@@ -230,9 +310,15 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		return
 	}
 
+	// Fetch current plan to preserve it while marking payment as past-due.
+	existingPlan := "PRO"
+	if sub, err := h.store.GetSubscription(c.Request.Context(), orgID); err == nil {
+		existingPlan = sub.Plan
+	}
+
 	_, err := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
 		OrgID:  orgID,
-		Plan:   "PRO",
+		Plan:   existingPlan,
 		Status: "PAST_DUE",
 	})
 	if err != nil {
@@ -257,15 +343,18 @@ func mapStripeStatus(s string) string {
 	}
 }
 
-func (h *Handlers) planFromPriceID(priceID string) string {
+// planFromPriceID maps a Stripe price ID to the internal plan name.
+// Returns an error for unrecognised price IDs instead of silently defaulting,
+// to prevent accidental privilege grants from malformed webhooks.
+func (h *Handlers) planFromPriceID(priceID string) (string, error) {
 	if h.stripe == nil || priceID == "" {
-		return "FREE"
+		return "FREE", nil
 	}
 	if id, _ := h.stripe.PriceIDForPlan("PRO"); id == priceID {
-		return "PRO"
+		return "PRO", nil
 	}
 	if id, _ := h.stripe.PriceIDForPlan("ENTERPRISE"); id == priceID {
-		return "ENTERPRISE"
+		return "ENTERPRISE", nil
 	}
-	return "PRO"
+	return "", fmt.Errorf("unrecognised price ID: %s", priceID)
 }

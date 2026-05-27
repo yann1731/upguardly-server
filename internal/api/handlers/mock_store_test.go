@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -67,6 +68,63 @@ func (m *mockStore) DeleteAlert(_ context.Context, _ string) error {
 	return m.deleteErr
 }
 
+// ── Organization stubs ────────────────────────────────────────────────────────
+
+func (m *mockStore) CreateOrganization(_ context.Context, _, _ string) (*models.Organization, error) {
+	return nil, nil
+}
+func (m *mockStore) GetOrganization(_ context.Context, _ string) (*models.Organization, error) {
+	return nil, models.ErrNotFound
+}
+func (m *mockStore) ListOrganizations(_ context.Context, _ string) ([]models.Organization, error) {
+	return nil, nil
+}
+func (m *mockStore) UpdateOrganization(_ context.Context, _ string, _ models.UpdateOrgRequest) (*models.Organization, error) {
+	return nil, nil
+}
+func (m *mockStore) DeleteOrganization(_ context.Context, _ string) error { return nil }
+
+// ── Member stubs ──────────────────────────────────────────────────────────────
+
+func (m *mockStore) GetMembership(_ context.Context, _, _ string) (*models.OrganizationMember, error) {
+	return nil, models.ErrNotFound
+}
+func (m *mockStore) ListMembers(_ context.Context, _ string) ([]models.OrganizationMember, error) {
+	return nil, nil
+}
+func (m *mockStore) UpdateMemberRole(_ context.Context, _, _ string, _ models.OrgRole) (*models.OrganizationMember, error) {
+	return nil, nil
+}
+func (m *mockStore) RemoveMember(_ context.Context, _, _ string) error { return nil }
+
+// ── Invitation stubs ──────────────────────────────────────────────────────────
+
+func (m *mockStore) CreateInvitation(_ context.Context, _, _, _ string, _ models.OrgRole, _ string, _ time.Time) (*models.Invitation, error) {
+	return nil, nil
+}
+func (m *mockStore) GetInvitationByToken(_ context.Context, _ string) (*models.Invitation, error) {
+	return nil, models.ErrNotFound
+}
+func (m *mockStore) GetInvitationByID(_ context.Context, _ string) (*models.Invitation, error) {
+	return nil, models.ErrNotFound
+}
+func (m *mockStore) ListInvitations(_ context.Context, _ string) ([]models.Invitation, error) {
+	return nil, nil
+}
+func (m *mockStore) AcceptInvitation(_ context.Context, _, _ string) (*models.OrganizationMember, error) {
+	return nil, nil
+}
+func (m *mockStore) RevokeInvitation(_ context.Context, _ string) error { return nil }
+
+// ── Subscription stubs ────────────────────────────────────────────────────────
+
+func (m *mockStore) GetSubscription(_ context.Context, _ string) (*models.Subscription, error) {
+	return nil, models.ErrNotFound
+}
+func (m *mockStore) UpsertSubscription(_ context.Context, _ models.UpsertSubscriptionParams) (*models.Subscription, error) {
+	return nil, nil
+}
+
 // newTestRouter returns a Gin router with userId pre-injected (bypasses real auth middleware).
 func newTestRouter(store *mockStore) (*gin.Engine, *handlers.Handlers) {
 	gin.SetMode(gin.TestMode)
@@ -75,7 +133,7 @@ func newTestRouter(store *mockStore) (*gin.Engine, *handlers.Handlers) {
 		c.Set("userId", testUserID)
 		c.Next()
 	})
-	h := handlers.NewHandlers(store)
+	h := handlers.NewHandlers(store, nil, nil)
 	return r, h
 }
 
