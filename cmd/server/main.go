@@ -14,7 +14,9 @@ import (
 	"upguardly-backend/internal/auth"
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/database"
+	"upguardly-backend/internal/mailer"
 	"upguardly-backend/internal/scheduler"
+	"upguardly-backend/internal/stripeservice"
 )
 
 func main() {
@@ -46,7 +48,9 @@ func main() {
 	log.Println("Scheduler started")
 
 	store := database.NewPrismaStore(db)
-	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain)
+	m := mailer.NewMailer(cfg.SMTP)
+	s := stripeservice.NewClient(cfg.Stripe)
+	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain, m, s)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

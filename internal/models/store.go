@@ -3,11 +3,13 @@ package models
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var ErrNotFound = errors.New("not found")
 
 type Store interface {
+	// Monitors
 	CreateMonitor(ctx context.Context, userId, name, monitorType, target string, interval, timeout int, enabled bool) (*Monitor, error)
 	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
 	GetMonitor(ctx context.Context, id, userId string) (*Monitor, error)
@@ -15,9 +17,35 @@ type Store interface {
 	DeleteMonitor(ctx context.Context, id, userId string) error
 	GetMonitorResults(ctx context.Context, monitorId, userId string, limit int) ([]MonitorResult, error)
 
+	// Alerts
 	CreateAlert(ctx context.Context, monitorId, userId, channel, target string, enabled bool) (*Alert, error)
 	ListAlerts(ctx context.Context, monitorId, userId string) ([]Alert, error)
 	GetAlert(ctx context.Context, id string) (*Alert, error)
 	UpdateAlert(ctx context.Context, id string, req UpdateAlertRequest) (*Alert, error)
 	DeleteAlert(ctx context.Context, id string) error
+
+	// Organizations
+	CreateOrganization(ctx context.Context, userId, name string) (*Organization, error)
+	GetOrganization(ctx context.Context, id string) (*Organization, error)
+	ListOrganizations(ctx context.Context, userId string) ([]Organization, error)
+	UpdateOrganization(ctx context.Context, id string, req UpdateOrgRequest) (*Organization, error)
+	DeleteOrganization(ctx context.Context, id string) error
+
+	// Members
+	GetMembership(ctx context.Context, orgId, userId string) (*OrganizationMember, error)
+	ListMembers(ctx context.Context, orgId string) ([]OrganizationMember, error)
+	UpdateMemberRole(ctx context.Context, orgId, userId string, role OrgRole) (*OrganizationMember, error)
+	RemoveMember(ctx context.Context, orgId, userId string) error
+
+	// Invitations
+	CreateInvitation(ctx context.Context, orgId, email, invitedBy string, role OrgRole, token string, expiresAt time.Time) (*Invitation, error)
+	GetInvitationByToken(ctx context.Context, token string) (*Invitation, error)
+	GetInvitationByID(ctx context.Context, id string) (*Invitation, error)
+	ListInvitations(ctx context.Context, orgId string) ([]Invitation, error)
+	AcceptInvitation(ctx context.Context, token, userId string) (*OrganizationMember, error)
+	RevokeInvitation(ctx context.Context, id string) error
+
+	// Subscriptions
+	GetSubscription(ctx context.Context, orgId string) (*Subscription, error)
+	UpsertSubscription(ctx context.Context, params UpsertSubscriptionParams) (*Subscription, error)
 }

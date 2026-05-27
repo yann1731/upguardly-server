@@ -14,6 +14,7 @@ type Config struct {
 	SuperTokens SuperTokensConfig
 	Etcd        EtcdConfig
 	Scheduler   SchedulerConfig
+	Stripe      StripeConfig
 }
 
 type SchedulerConfig struct {
@@ -53,6 +54,13 @@ type TwilioConfig struct {
 	FromNumber string
 }
 
+type StripeConfig struct {
+	SecretKey         string
+	WebhookSecret     string
+	ProPriceID        string
+	EnterprisePriceID string
+}
+
 func Load() *Config {
 	return &Config{
 		Port:        getEnv("PORT", "8080"),
@@ -80,6 +88,12 @@ func Load() *Config {
 			DialTimeout: time.Duration(getEnvInt("ETCD_DIAL_TIMEOUT_SECONDS", 5)) * time.Second,
 			Username:    getEnv("ETCD_USERNAME", ""),
 			Password:    getEnv("ETCD_PASSWORD", ""),
+		},
+		Stripe: StripeConfig{
+			SecretKey:         getEnv("STRIPE_SECRET_KEY", ""),
+			WebhookSecret:     getEnv("STRIPE_WEBHOOK_SECRET", ""),
+			ProPriceID:        getEnv("STRIPE_PRO_PRICE_ID", ""),
+			EnterprisePriceID: getEnv("STRIPE_ENTERPRISE_PRICE_ID", ""),
 		},
 		Scheduler: SchedulerConfig{
 			InstanceID:     getEnv("SCHEDULER_INSTANCE_ID", "scheduler-0"),
