@@ -3,6 +3,10 @@ FROM golang:1.25 AS dev
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
+# air provides live-reload: it rebuilds and restarts the binary on file changes.
+# Installed here (build runs with network: host) so the container never needs
+# network access at startup to fetch it.
+RUN go install github.com/air-verse/air@latest
 COPY . .
 RUN go run github.com/steebchen/prisma-client-go generate
 EXPOSE 8080
