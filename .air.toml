@@ -1,0 +1,22 @@
+# air live-reload config for the API server (cmd/server).
+# Used by docker-compose.dev.yaml. Builds into /tmp/air so the rebuilt binary
+# never lands in the bind-mounted source tree.
+root = "."
+tmp_dir = "/tmp/air"
+
+[build]
+  # -buildvcs=false: the source tree is bind-mounted with its .git dir, but the
+  # container runs as root while the files are host-owned, so git reports
+  # "dubious ownership" (exit 128) and VCS stamping fails the build. Dev binaries
+  # don't need VCS info, so skip stamping entirely.
+  cmd = "go build -buildvcs=false -o /tmp/air/server ./cmd/server"
+  bin = "/tmp/air/server"
+  delay = 500
+  include_ext = ["go"]
+  # The Prisma client is generated once at image build and preserved via an
+  # anonymous volume; it never changes at runtime, so don't watch it.
+  exclude_dir = ["internal/database/prisma", "prisma", "tmp"]
+  stop_on_error = true
+
+[misc]
+  clean_on_exit = true

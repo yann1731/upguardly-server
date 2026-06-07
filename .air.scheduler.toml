@@ -1,0 +1,17 @@
+# air live-reload config for the scheduler (cmd/scheduler).
+# Used by docker-compose.dev.yaml.
+root = "."
+tmp_dir = "/tmp/air"
+
+[build]
+  # See .air.toml: skip VCS stamping; the bind-mounted .git trips "dubious
+  # ownership" under the container's root user.
+  cmd = "go build -buildvcs=false -o /tmp/air/scheduler ./cmd/scheduler"
+  bin = "/tmp/air/scheduler"
+  delay = 500
+  include_ext = ["go"]
+  exclude_dir = ["internal/database/prisma", "prisma", "tmp"]
+  stop_on_error = true
+
+[misc]
+  clean_on_exit = true
