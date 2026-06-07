@@ -134,6 +134,7 @@ func (s *Scheduler) runCheck(ctx context.Context, m *db.MonitorModel) {
 	metrics.MonitorStatus.WithLabelValues(m.ID, m.Name, string(m.Type)).Set(metrics.StatusToGaugeValue(result.Status))
 
 	s.saveResult(ctx, m.ID, &result)
+	recordIncident(ctx, s.db, m.ID, &result)
 
 	s.mu.RLock()
 	lastStatus, hasLast := s.lastStatus[m.ID]

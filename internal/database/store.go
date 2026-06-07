@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"time"
 
 	db "upguardly-backend/internal/database/prisma"
 	"upguardly-backend/internal/models"
@@ -133,6 +134,126 @@ func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId s
 	return out, nil
 }
 
+// ── Incidents & stats ──────────────────────────────────────────────────────────
+
+func (s *PrismaStore) ListIncidents(ctx context.Context, monitorId, userId string, limit int) ([]models.Incident, error) {
+	if _, err := s.client.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(monitorId),
+		db.Monitor.UserID.Equals(userId),
+	).Exec(ctx); err != nil {
+		return nil, models.ErrNotFound
+	}
+
+	is, err := s.client.Prisma.Incident.FindMany(
+		db.Incident.MonitorID.Equals(monitorId),
+	).OrderBy(
+		db.Incident.StartedAt.Order(db.DESC),
+	).Take(limit).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]models.Incident, len(is))
+	for i := range is {
+		out[i] = *incidentToModel(&is[i])
+	}
+	return out, nil
+}
+
+func (s *PrismaStore) GetMonitorStats(ctx context.Context, monitorId, userId string, since time.Time) (*models.MonitorStats, error) {
+	if _, err := s.client.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(monitorId),
+		db.Monitor.UserID.Equals(userId),
+	).Exec(ctx); err != nil {
+		return nil, models.ErrNotFound
+	}
+
+	rs, err := s.client.Prisma.MonitorResult.FindMany(
+		db.MonitorResult.MonitorID.Equals(monitorId),
+		db.MonitorResult.CheckedAt.Gte(since),
+	).OrderBy(
+		db.MonitorResult.CheckedAt.Order(db.ASC),
+	).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	stats := computeStats(rs, since, time.Now())
+
+	incidents, err := s.client.Prisma.Incident.FindMany(
+		db.Incident.MonitorID.Equals(monitorId),
+		db.Incident.StartedAt.Gte(since),
+	).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats.IncidentCount = len(incidents)
+
+	return stats, nil
+}
+
+// statBuckets is the number of time buckets used for the response-time graph.
+const statBuckets = 48
+
+// computeStats derives min/max/avg latency and a bucketed average-latency series
+// from monitor results ordered ascending by CheckedAt. The window [since, until]
+// is split into statBuckets equal buckets; empty buckets are omitted.
+func computeStats(rs []db.MonitorResultModel, since, until time.Time) *models.MonitorStats {
+	stats := &models.MonitorStats{Points: []models.StatPoint{}}
+	if len(rs) == 0 {
+		return stats
+	}
+
+	min, max, sum := rs[0].Latency, rs[0].Latency, 0
+	for i := range rs {
+		l := rs[i].Latency
+		if l < min {
+			min = l
+		}
+		if l > max {
+			max = l
+		}
+		sum += l
+	}
+	stats.MinLatency = min
+	stats.MaxLatency = max
+	stats.TotalChecks = len(rs)
+	stats.AvgLatency = float64(sum) / float64(len(rs))
+
+	span := until.Sub(since)
+	if span <= 0 {
+		span = time.Second
+	}
+	bucketDur := span / statBuckets
+
+	type acc struct {
+		sum   int
+		count int
+	}
+	buckets := make([]acc, statBuckets)
+	for i := range rs {
+		idx := int(rs[i].CheckedAt.Sub(since) / bucketDur)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= statBuckets {
+			idx = statBuckets - 1
+		}
+		buckets[idx].sum += rs[i].Latency
+		buckets[idx].count++
+	}
+	for i, b := range buckets {
+		if b.count == 0 {
+			continue
+		}
+		stats.Points = append(stats.Points, models.StatPoint{
+			Timestamp:  since.Add(time.Duration(i)*bucketDur + bucketDur/2),
+			AvgLatency: float64(b.sum) / float64(b.count),
+		})
+	}
+	return stats
+}
+
 // ── Alert ────────────────────────────────────────────────────────────────────
 
 func (s *PrismaStore) CreateAlert(ctx context.Context, monitorId, userId, channel, target string, enabled bool) (*models.Alert, error) {
@@ -240,6 +361,28 @@ func alertToModel(a *db.AlertModel) *models.Alert {
 		Enabled:   a.Enabled,
 		CreatedAt: a.CreatedAt,
 	}
+}
+
+func incidentToModel(i *db.IncidentModel) *models.Incident {
+	inc := &models.Incident{
+		ID:        i.ID,
+		MonitorID: i.MonitorID,
+		Status:    models.Status(i.Status),
+		StartedAt: i.StartedAt,
+	}
+	if resolved, ok := i.ResolvedAt(); ok {
+		r := resolved
+		inc.ResolvedAt = &r
+		d := resolved.Sub(i.StartedAt).Milliseconds()
+		inc.DurationMs = &d
+	}
+	if code, ok := i.StatusCode(); ok {
+		inc.StatusCode = &code
+	}
+	if msg, ok := i.Message(); ok {
+		inc.Message = &msg
+	}
+	return inc
 }
 
 func resultToModel(r *db.MonitorResultModel) *models.MonitorResult {

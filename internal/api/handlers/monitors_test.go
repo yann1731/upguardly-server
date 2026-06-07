@@ -179,3 +179,58 @@ func TestGetMonitorResults(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 }
+
+func TestGetMonitorIncidents(t *testing.T) {
+	t.Run("returns incidents with default limit 100", func(t *testing.T) {
+		store := &mockStore{incidentsResult: []models.Incident{}}
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/incidents", h.GetMonitorIncidents)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/incidents", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 100, store.lastLimit)
+	})
+
+	t.Run("respects ?limit=10", func(t *testing.T) {
+		store := &mockStore{incidentsResult: []models.Incident{}}
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/incidents", h.GetMonitorIncidents)
+
+		doRequest(router, "GET", "/v1/monitors/mon-1/incidents?limit=10", "")
+
+		assert.Equal(t, 10, store.lastLimit)
+	})
+
+	t.Run("monitor not found returns 404", func(t *testing.T) {
+		store := &mockStore{incidentsErr: models.ErrNotFound}
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/incidents", h.GetMonitorIncidents)
+
+		w := doRequest(router, "GET", "/v1/monitors/missing/incidents", "")
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
+func TestGetMonitorStats(t *testing.T) {
+	t.Run("returns stats", func(t *testing.T) {
+		store := &mockStore{statsResult: &models.MonitorStats{AvgLatency: 42}}
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/stats", h.GetMonitorStats)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/stats?period=7d", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("monitor not found returns 404", func(t *testing.T) {
+		store := &mockStore{statsErr: models.ErrNotFound}
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/stats", h.GetMonitorStats)
+
+		w := doRequest(router, "GET", "/v1/monitors/missing/stats", "")
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}

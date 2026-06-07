@@ -16,6 +16,8 @@ type Store interface {
 	UpdateMonitor(ctx context.Context, id, userId string, req UpdateMonitorRequest) (*Monitor, error)
 	DeleteMonitor(ctx context.Context, id, userId string) error
 	GetMonitorResults(ctx context.Context, monitorId, userId string, limit int) ([]MonitorResult, error)
+	ListIncidents(ctx context.Context, monitorId, userId string, limit int) ([]Incident, error)
+	GetMonitorStats(ctx context.Context, monitorId, userId string, since time.Time) (*MonitorStats, error)
 
 	// Alerts
 	CreateAlert(ctx context.Context, monitorId, userId, channel, target string, enabled bool) (*Alert, error)

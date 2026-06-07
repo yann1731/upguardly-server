@@ -99,6 +99,8 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 				monitors.PUT("/:id", middleware.StrictRateLimit(), h.UpdateMonitor)
 				monitors.DELETE("/:id", h.DeleteMonitor)
 				monitors.GET("/:id/results", h.GetMonitorResults)
+				monitors.GET("/:id/incidents", h.GetMonitorIncidents)
+				monitors.GET("/:id/stats", h.GetMonitorStats)
 
 				monitors.POST("/:id/alerts", middleware.StrictRateLimit(), h.CreateAlert)
 				monitors.GET("/:id/alerts", h.ListAlerts)

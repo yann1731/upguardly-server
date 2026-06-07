@@ -2,13 +2,57 @@ package monitor
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"upguardly-backend/internal/models"
 )
 
 type HTTPChecker struct{}
+
+// classifyHTTPError maps a transport-level request error to a concise,
+// human-readable issue label (e.g. "timeout", "connection refused") so the
+// stored message describes the problem rather than dumping a raw Go error.
+func classifyHTTPError(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), os.IsTimeout(err):
+		return "Timeout"
+	case errors.Is(err, context.Canceled):
+		return "Check canceled"
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "DNS lookup failed"
+	}
+
+	var tlsErr *tls.CertificateVerificationError
+	if errors.As(err, &tlsErr) {
+		return "TLS certificate error"
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "Timeout"
+	}
+
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return "Connection refused"
+	case strings.Contains(msg, "no such host"):
+		return "DNS lookup failed"
+	case strings.Contains(msg, "tls:") || strings.Contains(msg, "x509:"):
+		return "TLS error"
+	default:
+		return "Connection error"
+	}
+}
 
 func (c *HTTPChecker) Check(ctx context.Context, target string, timeout time.Duration) models.CheckResult {
 	client := &http.Client{
@@ -22,7 +66,7 @@ func (c *HTTPChecker) Check(ctx context.Context, target string, timeout time.Dur
 		return models.CheckResult{
 			Status:  models.StatusDOWN,
 			Latency: int(time.Since(start).Milliseconds()),
-			Message: "Failed to create request: " + err.Error(),
+			Message: "Invalid request URL",
 		}
 	}
 
@@ -35,7 +79,7 @@ func (c *HTTPChecker) Check(ctx context.Context, target string, timeout time.Dur
 		return models.CheckResult{
 			Status:  models.StatusDOWN,
 			Latency: latency,
-			Message: "Request failed: " + err.Error(),
+			Message: classifyHTTPError(err),
 		}
 	}
 	defer resp.Body.Close()

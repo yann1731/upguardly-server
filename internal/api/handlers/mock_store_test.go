@@ -17,17 +17,21 @@ const testUserID = "test-user-id"
 // mockStore is a configurable in-memory implementation of models.Store.
 type mockStore struct {
 	// return values
-	monitorResult  *models.Monitor
-	monitorErr     error
-	monitorsResult []models.Monitor
-	monitorsErr    error
-	resultsResult  []models.MonitorResult
-	resultsErr     error
-	alertResult    *models.Alert
-	alertErr       error
-	alertsResult   []models.Alert
-	alertsErr      error
-	deleteErr      error
+	monitorResult   *models.Monitor
+	monitorErr      error
+	monitorsResult  []models.Monitor
+	monitorsErr     error
+	resultsResult   []models.MonitorResult
+	resultsErr      error
+	incidentsResult []models.Incident
+	incidentsErr    error
+	statsResult     *models.MonitorStats
+	statsErr        error
+	alertResult     *models.Alert
+	alertErr        error
+	alertsResult    []models.Alert
+	alertsErr       error
+	deleteErr       error
 
 	// captured call args
 	lastLimit int
@@ -51,6 +55,13 @@ func (m *mockStore) DeleteMonitor(_ context.Context, _, _ string) error {
 func (m *mockStore) GetMonitorResults(_ context.Context, _, _ string, limit int) ([]models.MonitorResult, error) {
 	m.lastLimit = limit
 	return m.resultsResult, m.resultsErr
+}
+func (m *mockStore) ListIncidents(_ context.Context, _, _ string, limit int) ([]models.Incident, error) {
+	m.lastLimit = limit
+	return m.incidentsResult, m.incidentsErr
+}
+func (m *mockStore) GetMonitorStats(_ context.Context, _, _ string, _ time.Time) (*models.MonitorStats, error) {
+	return m.statsResult, m.statsErr
 }
 func (m *mockStore) CreateAlert(_ context.Context, _, _, _, _ string, _ bool) (*models.Alert, error) {
 	return m.alertResult, m.alertErr

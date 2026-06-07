@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -184,4 +185,69 @@ func (h *Handlers) GetMonitorResults(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, results)
+}
+
+func (h *Handlers) GetMonitorIncidents(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	id := c.Param("id")
+
+	limit := 100
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+
+	incidents, err := h.store.ListIncidents(c.Request.Context(), id, userId, limit)
+	if err != nil {
+		if errors.Is(err, models.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get incidents"})
+		return
+	}
+
+	c.JSON(http.StatusOK, incidents)
+}
+
+// periodToDuration maps a stats period query value to a lookback window.
+// Unknown values fall back to 24h.
+func periodToDuration(period string) time.Duration {
+	switch period {
+	case "7d":
+		return 7 * 24 * time.Hour
+	case "30d":
+		return 30 * 24 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
+func (h *Handlers) GetMonitorStats(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	id := c.Param("id")
+	since := time.Now().Add(-periodToDuration(c.Query("period")))
+
+	stats, err := h.store.GetMonitorStats(c.Request.Context(), id, userId, since)
+	if err != nil {
+		if errors.Is(err, models.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get stats"})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
 }

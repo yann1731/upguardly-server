@@ -230,6 +230,7 @@ func (s *DistributedScheduler) runCheck(ctx context.Context, m *db.MonitorModel)
 	result := checker.Check(ctx, m.Target, timeout)
 
 	s.saveResult(ctx, m.ID, &result)
+	recordIncident(ctx, s.db, m.ID, &result)
 
 	lastStatus, hasLast, err := s.stateStore.GetLastStatus(m.ID)
 	if err != nil {

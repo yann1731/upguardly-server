@@ -84,8 +84,9 @@ model Monitor {
   createdAt DateTime      @default(now()) @map("created_at")
   updatedAt DateTime      @updatedAt @map("updated_at")
 
-  results MonitorResult[]
-  alerts  Alert[]
+  results   MonitorResult[]
+  alerts    Alert[]
+  incidents Incident[]
 
   @@index([userId])
   @@index([orgId])
@@ -104,6 +105,22 @@ model MonitorResult {
 
   @@index([monitorId, checkedAt])
   @@map("monitor_results")
+}
+
+model Incident {
+  id         String    @id @default(cuid())
+  monitorId  String    @map("monitor_id")
+  monitor    Monitor   @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status     Status
+  startedAt  DateTime  @default(now()) @map("started_at")
+  resolvedAt DateTime? @map("resolved_at")
+  statusCode Int?      @map("status_code")
+  message    String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([monitorId, startedAt])
+  @@index([monitorId, resolvedAt])
+  @@map("incidents")
 }
 
 model Alert {
