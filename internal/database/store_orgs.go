@@ -23,7 +23,7 @@ func (s *PrismaStore) CreateOrganization(ctx context.Context, userId, name strin
 	_, err = s.client.Prisma.OrganizationMember.CreateOne(
 		db.OrganizationMember.Organization.Link(db.Organization.ID.Equals(org.ID)),
 		db.OrganizationMember.UserID.Set(userId),
-		db.OrganizationMember.Role.Set(db.OrgRoleOWNER),
+		db.OrganizationMember.Role.Set(db.OrgRoleOwner),
 	).Exec(ctx)
 	if err != nil {
 		// Best-effort rollback
@@ -110,9 +110,15 @@ func (s *PrismaStore) ListMembers(ctx context.Context, orgId string) ([]models.O
 }
 
 func (s *PrismaStore) UpdateMemberRole(ctx context.Context, orgId, userId string, role models.OrgRole) (*models.OrganizationMember, error) {
-	m, err := s.client.Prisma.OrganizationMember.FindFirst(
+	existing, err := s.client.Prisma.OrganizationMember.FindFirst(
 		db.OrganizationMember.OrganizationID.Equals(orgId),
 		db.OrganizationMember.UserID.Equals(userId),
+	).Exec(ctx)
+	if err != nil {
+		return nil, models.ErrNotFound
+	}
+	m, err := s.client.Prisma.OrganizationMember.FindUnique(
+		db.OrganizationMember.ID.Equals(existing.ID),
 	).Update(
 		db.OrganizationMember.Role.Set(db.OrgRole(role)),
 	).Exec(ctx)
@@ -142,10 +148,10 @@ func (s *PrismaStore) CreateInvitation(ctx context.Context, orgId, email, invite
 	inv, err := s.client.Prisma.Invitation.CreateOne(
 		db.Invitation.Organization.Link(db.Organization.ID.Equals(orgId)),
 		db.Invitation.Email.Set(email),
-		db.Invitation.Role.Set(db.OrgRole(role)),
 		db.Invitation.Token.Set(token),
 		db.Invitation.InvitedBy.Set(invitedBy),
 		db.Invitation.ExpiresAt.Set(expiresAt),
+		db.Invitation.Role.Set(db.OrgRole(role)),
 	).Exec(ctx)
 	if err != nil {
 		return nil, err
@@ -198,7 +204,7 @@ func (s *PrismaStore) AcceptInvitation(ctx context.Context, token, userId string
 	_, err = s.client.Prisma.Invitation.FindUnique(
 		db.Invitation.ID.Equals(inv.ID),
 	).Update(
-		db.Invitation.Status.Set(db.InvitationStatusACCEPTED),
+		db.Invitation.Status.Set(db.InvitationStatusAccepted),
 	).Exec(ctx)
 	if err != nil {
 		return nil, err
@@ -219,7 +225,7 @@ func (s *PrismaStore) RevokeInvitation(ctx context.Context, id string) error {
 	_, err := s.client.Prisma.Invitation.FindUnique(
 		db.Invitation.ID.Equals(id),
 	).Update(
-		db.Invitation.Status.Set(db.InvitationStatusREVOKED),
+		db.Invitation.Status.Set(db.InvitationStatusRevoked),
 	).Exec(ctx)
 	return err
 }
