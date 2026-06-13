@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -150,8 +151,18 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 		return
 	}
 
+	// A user may belong to at most one organization.
+	if existing, err := h.store.ListOrganizations(c.Request.Context(), userId); err == nil && len(existing) > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "You already belong to an organization"})
+		return
+	}
+
 	member, err := h.store.AcceptInvitation(c.Request.Context(), tokenHash, userId)
 	if err != nil {
+		if errors.Is(err, models.ErrConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "You already belong to an organization"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
 		return
 	}

@@ -25,6 +25,7 @@ const (
 
 type Monitor struct {
 	ID        string      `json:"id"`
+	OrgID     *string     `json:"orgId,omitempty"`
 	Name      string      `json:"name"`
 	Type      MonitorType `json:"type"`
 	Target    string      `json:"target"`
@@ -36,6 +37,7 @@ type Monitor struct {
 }
 
 type CreateMonitorRequest struct {
+	OrgID    string      `json:"orgId" binding:"required"`
 	Name     string      `json:"name" binding:"required"`
 	Type     MonitorType `json:"type" binding:"required,oneof=HTTP PORT PING"`
 	Target   string      `json:"target" binding:"required"`

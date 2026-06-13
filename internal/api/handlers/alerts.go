@@ -89,6 +89,31 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 		return
 	}
 
+	// Enforce the owning org's plan limit on alerts per monitor.
+	monitor, err := h.store.GetMonitor(c.Request.Context(), monitorID, userId)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	plan := "FREE"
+	if monitor.OrgID != nil {
+		plan = h.planForOrg(c.Request.Context(), *monitor.OrgID)
+	}
+	limits := models.LimitsForPlan(plan)
+	if limits.MaxAlertsPerMonitor != models.Unlimited {
+		existing, err := h.store.ListAlerts(c.Request.Context(), monitorID, userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check alert quota"})
+			return
+		}
+		if len(existing) >= limits.MaxAlertsPerMonitor {
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error": fmt.Sprintf("Alert limit reached for your plan (%d per monitor). Upgrade to add more.", limits.MaxAlertsPerMonitor),
+			})
+			return
+		}
+	}
+
 	alert, err := h.store.CreateAlert(c.Request.Context(), monitorID, userId, string(req.Channel), req.Target, *req.Enabled)
 	if err != nil {
 		if isNotFound(err) {

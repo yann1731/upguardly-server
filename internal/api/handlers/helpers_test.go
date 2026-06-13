@@ -37,3 +37,22 @@ func anAlert() *models.Alert {
 		CreatedAt: time.Now(),
 	}
 }
+
+func aMembership() *models.OrganizationMember {
+	return &models.OrganizationMember{
+		ID:        "member-1",
+		OrgID:     "test-org-id",
+		UserID:    "test-user-id",
+		Role:      models.OrgRoleMember,
+		CreatedAt: time.Now(),
+	}
+}
+
+func aSubscription(plan string) *models.Subscription {
+	return &models.Subscription{
+		ID:     "sub-1",
+		OrgID:  "test-org-id",
+		Plan:   plan,
+		Status: "ACTIVE",
+	}
+}
