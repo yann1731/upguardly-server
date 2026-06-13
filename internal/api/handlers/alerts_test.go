@@ -11,7 +11,8 @@ import (
 
 func TestCreateAlert(t *testing.T) {
 	t.Run("valid body returns 201", func(t *testing.T) {
-		store := &mockStore{alertResult: anAlert()}
+		// Monitor has no org → FREE plan (1 alert/monitor); no existing alerts.
+		store := &mockStore{alertResult: anAlert(), monitorResult: aMonitor()}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors/:id/alerts", h.CreateAlert)
 
@@ -21,7 +22,7 @@ func TestCreateAlert(t *testing.T) {
 	})
 
 	t.Run("monitor not found returns 404", func(t *testing.T) {
-		store := &mockStore{alertErr: models.ErrNotFound}
+		store := &mockStore{monitorErr: models.ErrNotFound}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors/:id/alerts", h.CreateAlert)
 
@@ -38,6 +39,20 @@ func TestCreateAlert(t *testing.T) {
 		w := doRequest(router, "POST", "/v1/monitors/mon-1/alerts", `{"channel":"EMAIL"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("alert limit reached returns 402", func(t *testing.T) {
+		// FREE plan caps at 1 alert/monitor; monitor already has one.
+		store := &mockStore{
+			monitorResult: aMonitor(),
+			alertsResult:  []models.Alert{*anAlert()},
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors/:id/alerts", h.CreateAlert)
+
+		w := doRequest(router, "POST", "/v1/monitors/mon-1/alerts", `{"channel":"EMAIL","target":"user@example.com"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
 }
 

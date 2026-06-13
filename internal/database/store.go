@@ -19,7 +19,7 @@ func NewPrismaStore(client *Client) *PrismaStore {
 
 // ── Monitor ──────────────────────────────────────────────────────────────────
 
-func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, name, monitorType, target string, interval, timeout int, enabled bool) (*models.Monitor, error) {
+func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool) (*models.Monitor, error) {
 	m, err := s.client.Prisma.Monitor.CreateOne(
 		db.Monitor.UserID.Set(userId),
 		db.Monitor.Name.Set(name),
@@ -28,11 +28,22 @@ func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, name, monitorTy
 		db.Monitor.Interval.Set(interval),
 		db.Monitor.Timeout.Set(timeout),
 		db.Monitor.Enabled.Set(enabled),
+		db.Monitor.Org.Link(db.Organization.ID.Equals(orgId)),
 	).Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return monitorToModel(m), nil
+}
+
+func (s *PrismaStore) CountMonitorsByOrg(ctx context.Context, orgId string) (int, error) {
+	ms, err := s.client.Prisma.Monitor.FindMany(
+		db.Monitor.OrgID.Equals(orgId),
+	).Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(ms), nil
 }
 
 func (s *PrismaStore) ListMonitors(ctx context.Context, userId string) ([]models.Monitor, error) {
@@ -339,8 +350,13 @@ func (s *PrismaStore) DeleteAlert(ctx context.Context, id string) error {
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
 func monitorToModel(m *db.MonitorModel) *models.Monitor {
+	var orgID *string
+	if id, ok := m.OrgID(); ok {
+		orgID = &id
+	}
 	return &models.Monitor{
 		ID:        m.ID,
+		OrgID:     orgID,
 		Name:      m.Name,
 		Type:      models.MonitorType(m.Type),
 		Target:    m.Target,

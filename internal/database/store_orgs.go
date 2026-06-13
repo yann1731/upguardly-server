@@ -16,6 +16,9 @@ func (s *PrismaStore) CreateOrganization(ctx context.Context, userId, name strin
 		db.Organization.OwnerID.Set(userId),
 	).Exec(ctx)
 	if err != nil {
+		if _, ok := db.IsErrUniqueConstraint(err); ok {
+			return nil, models.ErrConflict
+		}
 		return nil, err
 	}
 
@@ -28,6 +31,10 @@ func (s *PrismaStore) CreateOrganization(ctx context.Context, userId, name strin
 	if err != nil {
 		// Best-effort rollback
 		_, _ = s.client.Prisma.Organization.FindUnique(db.Organization.ID.Equals(org.ID)).Delete().Exec(ctx)
+		// A unique violation here means the user already belongs to an org.
+		if _, ok := db.IsErrUniqueConstraint(err); ok {
+			return nil, models.ErrConflict
+		}
 		return nil, err
 	}
 
@@ -201,6 +208,20 @@ func (s *PrismaStore) AcceptInvitation(ctx context.Context, token, userId string
 		return nil, models.ErrNotFound
 	}
 
+	// Create the membership first so a failure (e.g. the user already belongs to
+	// an org) leaves the invitation PENDING rather than consuming it.
+	m, err := s.client.Prisma.OrganizationMember.CreateOne(
+		db.OrganizationMember.Organization.Link(db.Organization.ID.Equals(inv.OrganizationID)),
+		db.OrganizationMember.UserID.Set(userId),
+		db.OrganizationMember.Role.Set(inv.Role),
+	).Exec(ctx)
+	if err != nil {
+		if _, ok := db.IsErrUniqueConstraint(err); ok {
+			return nil, models.ErrConflict
+		}
+		return nil, err
+	}
+
 	_, err = s.client.Prisma.Invitation.FindUnique(
 		db.Invitation.ID.Equals(inv.ID),
 	).Update(
@@ -210,14 +231,6 @@ func (s *PrismaStore) AcceptInvitation(ctx context.Context, token, userId string
 		return nil, err
 	}
 
-	m, err := s.client.Prisma.OrganizationMember.CreateOne(
-		db.OrganizationMember.Organization.Link(db.Organization.ID.Equals(inv.OrganizationID)),
-		db.OrganizationMember.UserID.Set(userId),
-		db.OrganizationMember.Role.Set(inv.Role),
-	).Exec(ctx)
-	if err != nil {
-		return nil, err
-	}
 	return memberToModel(m), nil
 }
 
