@@ -363,7 +363,7 @@ All config is loaded from environment variables in `internal/config/config.go`
 | `SUPERTOKENS_API_KEY` | — | SuperTokens core API key |
 | `API_DOMAIN` | `http://localhost:8080` | Public API origin (for SuperTokens) |
 | `WEBSITE_DOMAIN` | `http://localhost:3000` | Frontend origin — CORS + redirect/invite links |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | — / `587` / … | Email alerter + invitations |
+| `SENDGRID_API_KEY` / `SENDGRID_FROM` / `SENDGRID_FROM_NAME` | — / — / `Upguardly` | SendGrid email alerter + invitations (API key, verified sender, display name) |
 | `TWILIO_SID` / `TWILIO_TOKEN` / `TWILIO_FROM` | — | SMS alerter |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | — | Stripe API + webhook verification |
 | `STRIPE_PRO_PRICE_ID` / `STRIPE_ENTERPRISE_PRICE_ID` | — | Plan → price mapping |

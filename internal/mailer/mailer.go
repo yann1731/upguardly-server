@@ -2,22 +2,24 @@ package mailer
 
 import (
 	"fmt"
-	"net/smtp"
+
+	"github.com/sendgrid/sendgrid-go"
+	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
 	"upguardly-backend/internal/config"
 )
 
 type Mailer struct {
-	cfg config.SMTPConfig
+	cfg config.SendGridConfig
 }
 
-func NewMailer(cfg config.SMTPConfig) *Mailer {
+func NewMailer(cfg config.SendGridConfig) *Mailer {
 	return &Mailer{cfg: cfg}
 }
 
 func (m *Mailer) SendInvitation(to, orgName, inviterName, acceptURL string) error {
-	if m.cfg.Host == "" {
-		return fmt.Errorf("SMTP not configured")
+	if m.cfg.APIKey == "" {
+		return fmt.Errorf("SendGrid not configured")
 	}
 
 	subject := fmt.Sprintf("You've been invited to join %s on Upguardly", orgName)
@@ -35,18 +37,18 @@ If you did not expect this invitation, you can safely ignore this email.
 Upguardly
 `, inviterName, orgName, acceptURL)
 
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		m.cfg.From, to, subject, body)
+	from := mail.NewEmail(m.cfg.FromName, m.cfg.From)
+	recipient := mail.NewEmail("", to)
+	message := mail.NewSingleEmail(from, subject, recipient, body, "")
 
-	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
-
-	var auth smtp.Auth
-	if m.cfg.User != "" {
-		auth = smtp.PlainAuth("", m.cfg.User, m.cfg.Password, m.cfg.Host)
+	client := sendgrid.NewSendClient(m.cfg.APIKey)
+	resp, err := client.Send(message)
+	if err != nil {
+		return fmt.Errorf("failed to send invitation email: %w", err)
 	}
 
-	if err := smtp.SendMail(addr, auth, m.cfg.From, []string{to}, []byte(msg)); err != nil {
-		return fmt.Errorf("failed to send invitation email: %w", err)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("SendGrid returned status %d: %s", resp.StatusCode, resp.Body)
 	}
 	return nil
 }

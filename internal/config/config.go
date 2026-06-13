@@ -10,7 +10,7 @@ import (
 type Config struct {
 	Port        string
 	DatabaseURL string
-	SMTP        SMTPConfig
+	SendGrid    SendGridConfig
 	Twilio      TwilioConfig
 	SuperTokens SuperTokensConfig
 	Etcd        EtcdConfig
@@ -41,12 +41,10 @@ type SuperTokensConfig struct {
 	WebsiteDomain string
 }
 
-type SMTPConfig struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	From     string
+type SendGridConfig struct {
+	APIKey   string
+	From     string // verified sender email
+	FromName string // display name, optional
 }
 
 type TwilioConfig struct {
@@ -72,12 +70,10 @@ func Load() *Config {
 			APIDomain:     getEnv("API_DOMAIN", "http://localhost:8080"),
 			WebsiteDomain: getEnv("WEBSITE_DOMAIN", "http://localhost:3000"),
 		},
-		SMTP: SMTPConfig{
-			Host:     getEnv("SMTP_HOST", ""),
-			Port:     getEnvInt("SMTP_PORT", 587),
-			User:     getEnv("SMTP_USER", ""),
-			Password: getEnv("SMTP_PASS", ""),
-			From:     getEnv("SMTP_FROM", ""),
+		SendGrid: SendGridConfig{
+			APIKey:   getEnv("SENDGRID_API_KEY", ""),
+			From:     getEnv("SENDGRID_FROM", ""),
+			FromName: getEnv("SENDGRID_FROM_NAME", "Upguardly"),
 		},
 		Twilio: TwilioConfig{
 			AccountSID: getEnv("TWILIO_SID", ""),
@@ -135,6 +131,9 @@ func (c *Config) warnMissingSecrets() {
 	}
 	if c.Stripe.WebhookSecret == "" {
 		log.Println("[WARN] config: STRIPE_WEBHOOK_SECRET is not set — Stripe webhooks cannot be verified")
+	}
+	if c.SendGrid.APIKey == "" {
+		log.Println("[WARN] config: SENDGRID_API_KEY is not set — email alerts and invitations will not be sent")
 	}
 	if os.Getenv("METRICS_TOKEN") == "" {
 		log.Println("[WARN] config: METRICS_TOKEN is not set — /metrics endpoint is publicly accessible")
