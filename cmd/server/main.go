@@ -48,7 +48,7 @@ func main() {
 	log.Println("Scheduler started")
 
 	store := database.NewPrismaStore(db)
-	m := mailer.NewMailer(cfg.SMTP)
+	m := mailer.NewMailer(cfg.SendGrid)
 	s := stripeservice.NewClient(cfg.Stripe)
 	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain, m, s)
 

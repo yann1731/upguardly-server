@@ -18,7 +18,7 @@ type Manager struct {
 func NewManager(cfg *config.Config) *Manager {
 	return &Manager{
 		alerters: map[models.AlertChannel]Alerter{
-			models.AlertChannelEMAIL:   NewEmailAlerter(cfg.SMTP),
+			models.AlertChannelEMAIL:   NewEmailAlerter(cfg.SendGrid),
 			models.AlertChannelSMS:     NewSMSAlerter(cfg.Twilio),
 			models.AlertChannelDISCORD: NewDiscordAlerter(),
 			models.AlertChannelSLACK:   NewSlackAlerter(),

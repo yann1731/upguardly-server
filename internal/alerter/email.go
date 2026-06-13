@@ -3,26 +3,28 @@ package alerter
 import (
 	"context"
 	"fmt"
-	"net/smtp"
+
+	"github.com/sendgrid/sendgrid-go"
+	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/models"
 )
 
 type EmailAlerter struct {
-	config config.SMTPConfig
+	config config.SendGridConfig
 	To     string
 }
 
-func NewEmailAlerter(cfg config.SMTPConfig) *EmailAlerter {
+func NewEmailAlerter(cfg config.SendGridConfig) *EmailAlerter {
 	return &EmailAlerter{
 		config: cfg,
 	}
 }
 
 func (a *EmailAlerter) Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error {
-	if a.config.Host == "" {
-		return fmt.Errorf("SMTP not configured")
+	if a.config.APIKey == "" {
+		return fmt.Errorf("SendGrid not configured")
 	}
 
 	if a.To == "" {
@@ -43,19 +45,18 @@ Message: %s
 Sent by Upguardly Monitoring
 `, monitor.Name, result.Status, monitor.Type, monitor.Target, result.Latency, result.Message)
 
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		a.config.From, a.To, subject, body)
+	from := mail.NewEmail(a.config.FromName, a.config.From)
+	to := mail.NewEmail("", a.To)
+	message := mail.NewSingleEmail(from, subject, to, body, "")
 
-	addr := fmt.Sprintf("%s:%d", a.config.Host, a.config.Port)
-
-	var auth smtp.Auth
-	if a.config.User != "" {
-		auth = smtp.PlainAuth("", a.config.User, a.config.Password, a.config.Host)
-	}
-
-	err := smtp.SendMail(addr, auth, a.config.From, []string{a.To}, []byte(msg))
+	client := sendgrid.NewSendClient(a.config.APIKey)
+	resp, err := client.SendWithContext(ctx, message)
 	if err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("SendGrid returned status %d: %s", resp.StatusCode, resp.Body)
 	}
 
 	return nil
