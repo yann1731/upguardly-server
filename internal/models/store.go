@@ -8,9 +8,14 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// ErrConflict is returned when a write violates a uniqueness rule, e.g. a
+// duplicate organization name or a user joining a second organization.
+var ErrConflict = errors.New("conflict")
+
 type Store interface {
 	// Monitors
-	CreateMonitor(ctx context.Context, userId, name, monitorType, target string, interval, timeout int, enabled bool) (*Monitor, error)
+	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool) (*Monitor, error)
+	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
 	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
 	GetMonitor(ctx context.Context, id, userId string) (*Monitor, error)
 	UpdateMonitor(ctx context.Context, id, userId string, req UpdateMonitorRequest) (*Monitor, error)

@@ -23,8 +23,18 @@ func (h *Handlers) CreateOrg(c *gin.Context) {
 		return
 	}
 
+	// A user may belong to at most one organization.
+	if existing, err := h.store.ListOrganizations(c.Request.Context(), userId); err == nil && len(existing) > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "You already belong to an organization"})
+		return
+	}
+
 	org, err := h.store.CreateOrganization(c.Request.Context(), userId, req.Name)
 	if err != nil {
+		if errors.Is(err, models.ErrConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "That organization name is already taken"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create organization"})
 		return
 	}

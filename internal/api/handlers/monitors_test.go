@@ -13,11 +13,11 @@ import (
 
 func TestCreateMonitor(t *testing.T) {
 	t.Run("valid body returns 201 with monitor", func(t *testing.T) {
-		store := &mockStore{monitorResult: aMonitor()}
+		store := &mockStore{monitorResult: aMonitor(), membershipResult: aMembership()}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"My Monitor","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"My Monitor","type":"HTTP","target":"https://example.com"}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
 		var got models.Monitor
@@ -30,7 +30,17 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","type":"HTTP","target":"https://example.com"}`)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("missing orgId returns 400", func(t *testing.T) {
+		store := &mockStore{}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"https://example.com"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
@@ -40,9 +50,46 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"INVALID","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"INVALID","target":"https://example.com"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("non-member returns 403", func(t *testing.T) {
+		store := &mockStore{membershipErr: models.ErrNotFound}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"https://example.com"}`)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("monitor limit reached returns 402", func(t *testing.T) {
+		// FREE plan caps at 5 monitors; org already has 5.
+		store := &mockStore{membershipResult: aMembership(), monitorCount: 5}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"https://example.com"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("PRO plan allows beyond free limit", func(t *testing.T) {
+		// PRO caps at 50; org has 6 monitors — should succeed.
+		store := &mockStore{
+			monitorResult:    aMonitor(),
+			membershipResult: aMembership(),
+			subResult:        aSubscription("PRO"),
+			monitorCount:     6,
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"https://example.com"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 }
 

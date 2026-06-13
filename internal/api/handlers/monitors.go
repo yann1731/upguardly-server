@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -39,7 +40,29 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		return
 	}
 
-	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.Name, string(req.Type), req.Target, req.Interval, req.Timeout, *req.Enabled)
+	// The monitor must belong to an org the caller is a member of.
+	if _, err := h.store.GetMembership(c.Request.Context(), req.OrgID, userId); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this organization"})
+		return
+	}
+
+	// Enforce the org's plan limit on the number of monitors.
+	limits := models.LimitsForPlan(h.planForOrg(c.Request.Context(), req.OrgID))
+	if limits.MaxMonitors != models.Unlimited {
+		count, err := h.store.CountMonitorsByOrg(c.Request.Context(), req.OrgID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
+			return
+		}
+		if count >= limits.MaxMonitors {
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error": fmt.Sprintf("Monitor limit reached for your plan (%d). Upgrade to add more.", limits.MaxMonitors),
+			})
+			return
+		}
+	}
+
+	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, req.Interval, req.Timeout, *req.Enabled)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})
 		return
