@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/coordination"
@@ -17,6 +19,10 @@ import (
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("[INFO] no .env file loaded (%v); relying on process environment", err)
+	}
+
 	cfg := config.Load()
 
 	log.Printf("Starting scheduler instance: %s", cfg.Scheduler.InstanceID)

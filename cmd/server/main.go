@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/api"
 	"upguardly-backend/internal/auth"
@@ -20,6 +22,10 @@ import (
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("[INFO] no .env file loaded (%v); relying on process environment", err)
+	}
+
 	cfg := config.Load()
 
 	m := mailer.NewMailer(cfg.SendGrid)
