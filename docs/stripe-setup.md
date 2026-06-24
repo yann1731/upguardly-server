@@ -14,7 +14,7 @@ This guide walks through obtaining the values for the placeholders in:
 
 | Variable | Format | Purpose |
 | --- | --- | --- |
-| `STRIPE_SECRET_KEY` | `sk_test_…` / `sk_live_…` | Authenticates API calls (checkout, portal, customers). |
+| `STRIPE_SECRET_KEY` | `rk_test_…` / `rk_live_…` | Authenticates API calls (checkout, portal, customers). Use a **restricted** key — see §2. |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` | Verifies signatures on `POST /v1/webhooks/stripe`. |
 | `STRIPE_PRO_PRICE_ID` | `price_…` | Recurring price for the PRO plan. |
 | `STRIPE_ENTERPRISE_PRICE_ID` | `price_…` | Recurring price for the ENTERPRISE plan. |
@@ -43,10 +43,25 @@ In the Stripe dashboard → **Product catalog** → **Add product**:
 `PriceIDForPlan` in `internal/stripeservice/client.go` maps the plan name a customer
 selects to these IDs, so they must be set for checkout to work.
 
-## 2. Copy the secret key
+## 2. Create a restricted key
 
-Dashboard → **Developers → API keys** → copy the **Secret key** into `STRIPE_SECRET_KEY`
-(`sk_test_…` for staging, `sk_live_…` for production).
+Don't use the full-access **Secret key** — a leaked `sk_…` key can do anything on the Stripe
+account. The backend only performs four operations (create/list customers, create checkout
+sessions, create billing-portal sessions; webhooks are verified with the signing secret, not
+the API key), so create a **restricted key** scoped to exactly those.
+
+Dashboard → **Developers → API keys** → **Create restricted key**. Set these permissions and
+leave **everything else as None**:
+
+| Resource | Permission |
+| --- | --- |
+| Customers | **Write** (Write includes Read) |
+| Checkout Sessions | **Write** |
+| Customer portal | **Write** |
+
+Copy the resulting key into `STRIPE_SECRET_KEY` (`rk_test_…` for local/staging, `rk_live_…`
+for production). If you later add Stripe API calls to the backend, this key must be reissued
+with the matching scope or those calls will fail with a `permission`/`401` error.
 
 ## 3. Configure the webhook
 
@@ -74,7 +89,7 @@ stripe listen --forward-to localhost:8080/v1/webhooks/stripe
 ```
 
 `stripe listen` prints a `whsec_…` secret; put it in `upguardly-server/.env` as
-`STRIPE_WEBHOOK_SECRET`, set `STRIPE_SECRET_KEY` to your `sk_test_…` key, and set the two
+`STRIPE_WEBHOOK_SECRET`, set `STRIPE_SECRET_KEY` to your restricted `rk_test_…` key, and set the two
 test-mode price IDs. Trigger events with e.g. `stripe trigger customer.subscription.updated`.
 
 ## 5. Verify
