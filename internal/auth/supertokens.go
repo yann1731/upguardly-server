@@ -2,13 +2,17 @@ package auth
 
 import (
 	"upguardly-backend/internal/config"
+	"upguardly-backend/internal/mailer"
 
+	"github.com/supertokens/supertokens-golang/ingredients/emaildelivery"
 	"github.com/supertokens/supertokens-golang/recipe/emailpassword"
+	"github.com/supertokens/supertokens-golang/recipe/emailverification"
+	"github.com/supertokens/supertokens-golang/recipe/emailverification/evmodels"
 	"github.com/supertokens/supertokens-golang/recipe/session"
 	"github.com/supertokens/supertokens-golang/supertokens"
 )
 
-func Init(cfg *config.Config) error {
+func Init(cfg *config.Config, m *mailer.Mailer) error {
 	apiBasePath := "/auth"
 	websiteBasePath := "/auth"
 
@@ -26,6 +30,19 @@ func Init(cfg *config.Config) error {
 		},
 		RecipeList: []supertokens.Recipe{
 			emailpassword.Init(nil),
+			emailverification.Init(evmodels.TypeInput{
+				Mode: evmodels.ModeOptional,
+				EmailDelivery: &emaildelivery.TypeInput{
+					Override: func(original emaildelivery.EmailDeliveryInterface) emaildelivery.EmailDeliveryInterface {
+						sendEmail := func(input emaildelivery.EmailType, _ supertokens.UserContext) error {
+							ev := input.EmailVerification
+							return m.SendVerificationEmail(ev.User.Email, ev.EmailVerifyLink)
+						}
+						original.SendEmail = &sendEmail
+						return original
+					},
+				},
+			}),
 			session.Init(nil),
 		},
 	})

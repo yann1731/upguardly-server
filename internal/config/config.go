@@ -48,9 +48,10 @@ type SendGridConfig struct {
 }
 
 type TwilioConfig struct {
-	AccountSID string
-	AuthToken  string
-	FromNumber string
+	AccountSID   string // Account SID (AC…), used in the request URL
+	APIKeySID    string // API Key SID (SK…), used as the Basic-auth username
+	APIKeySecret string // API Key secret, used as the Basic-auth password
+	FromNumber   string
 }
 
 type StripeConfig struct {
@@ -76,9 +77,10 @@ func Load() *Config {
 			FromName: getEnv("SENDGRID_FROM_NAME", "Upguardly"),
 		},
 		Twilio: TwilioConfig{
-			AccountSID: getEnv("TWILIO_SID", ""),
-			AuthToken:  getEnv("TWILIO_TOKEN", ""),
-			FromNumber: getEnv("TWILIO_FROM", ""),
+			AccountSID:   getEnv("TWILIO_SID", ""),
+			APIKeySID:    getEnv("TWILIO_API_KEY_SID", ""),
+			APIKeySecret: getEnv("TWILIO_API_KEY_SECRET", ""),
+			FromNumber:   getEnv("TWILIO_FROM", ""),
 		},
 		Etcd: EtcdConfig{
 			Endpoints:   []string{getEnv("ETCD_ENDPOINT", "http://localhost:2379")},

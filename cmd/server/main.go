@@ -22,7 +22,9 @@ import (
 func main() {
 	cfg := config.Load()
 
-	if err := auth.Init(cfg); err != nil {
+	m := mailer.NewMailer(cfg.SendGrid)
+
+	if err := auth.Init(cfg, m); err != nil {
 		log.Fatalf("Failed to initialize SuperTokens: %v", err)
 	}
 	log.Println("SuperTokens initialized")
@@ -48,7 +50,6 @@ func main() {
 	log.Println("Scheduler started")
 
 	store := database.NewPrismaStore(db)
-	m := mailer.NewMailer(cfg.SendGrid)
 	s := stripeservice.NewClient(cfg.Stripe)
 	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain, m, s)
 

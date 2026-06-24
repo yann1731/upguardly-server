@@ -25,7 +25,7 @@ func NewSMSAlerter(cfg config.TwilioConfig) *SMSAlerter {
 }
 
 func (a *SMSAlerter) Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error {
-	if a.config.AccountSID == "" || a.config.AuthToken == "" {
+	if a.config.AccountSID == "" || a.config.APIKeySID == "" || a.config.APIKeySecret == "" {
 		return fmt.Errorf("Twilio not configured")
 	}
 
@@ -58,7 +58,9 @@ func (a *SMSAlerter) Send(ctx context.Context, monitor *models.Monitor, result *
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.SetBasicAuth(a.config.AccountSID, a.config.AuthToken)
+	// API key auth: the URL path is scoped to the Account SID, while the
+	// request is authenticated with the API key SID + secret.
+	req.SetBasicAuth(a.config.APIKeySID, a.config.APIKeySecret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := http.DefaultClient.Do(req)

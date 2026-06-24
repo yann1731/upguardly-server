@@ -52,3 +52,37 @@ Upguardly
 	}
 	return nil
 }
+
+func (m *Mailer) SendVerificationEmail(to, verifyURL string) error {
+	if m.cfg.APIKey == "" {
+		return fmt.Errorf("SendGrid not configured")
+	}
+
+	subject := "Verify your Upguardly email address"
+	body := fmt.Sprintf(`Hi,
+
+Please confirm your email address to finish setting up your Upguardly account:
+
+%s
+
+If you did not create this account, you can safely ignore this email.
+
+---
+Upguardly
+`, verifyURL)
+
+	from := mail.NewEmail(m.cfg.FromName, m.cfg.From)
+	recipient := mail.NewEmail("", to)
+	message := mail.NewSingleEmail(from, subject, recipient, body, "")
+
+	client := sendgrid.NewSendClient(m.cfg.APIKey)
+	resp, err := client.Send(message)
+	if err != nil {
+		return fmt.Errorf("failed to send verification email: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("SendGrid returned status %d: %s", resp.StatusCode, resp.Body)
+	}
+	return nil
+}
