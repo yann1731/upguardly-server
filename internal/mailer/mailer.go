@@ -53,6 +53,42 @@ Upguardly
 	return nil
 }
 
+func (m *Mailer) SendPasswordResetEmail(to, resetURL string) error {
+	if m.cfg.APIKey == "" {
+		return fmt.Errorf("SendGrid not configured")
+	}
+
+	subject := "Reset your Upguardly password"
+	body := fmt.Sprintf(`Hi,
+
+We received a request to reset the password for your Upguardly account.
+Click the link below to choose a new password (this link expires shortly):
+
+%s
+
+If you did not request a password reset, you can safely ignore this email —
+your password will not change.
+
+---
+Upguardly
+`, resetURL)
+
+	from := mail.NewEmail(m.cfg.FromName, m.cfg.From)
+	recipient := mail.NewEmail("", to)
+	message := mail.NewSingleEmail(from, subject, recipient, body, "")
+
+	client := sendgrid.NewSendClient(m.cfg.APIKey)
+	resp, err := client.Send(message)
+	if err != nil {
+		return fmt.Errorf("failed to send password reset email: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("SendGrid returned status %d: %s", resp.StatusCode, resp.Body)
+	}
+	return nil
+}
+
 func (m *Mailer) SendVerificationEmail(to, verifyURL string) error {
 	if m.cfg.APIKey == "" {
 		return fmt.Errorf("SendGrid not configured")

@@ -6,6 +6,7 @@ import (
 
 	"github.com/supertokens/supertokens-golang/ingredients/emaildelivery"
 	"github.com/supertokens/supertokens-golang/recipe/emailpassword"
+	"github.com/supertokens/supertokens-golang/recipe/emailpassword/epmodels"
 	"github.com/supertokens/supertokens-golang/recipe/emailverification"
 	"github.com/supertokens/supertokens-golang/recipe/emailverification/evmodels"
 	"github.com/supertokens/supertokens-golang/recipe/session"
@@ -29,7 +30,18 @@ func Init(cfg *config.Config, m *mailer.Mailer) error {
 			WebsiteBasePath: &websiteBasePath,
 		},
 		RecipeList: []supertokens.Recipe{
-			emailpassword.Init(nil),
+			emailpassword.Init(&epmodels.TypeInput{
+				EmailDelivery: &emaildelivery.TypeInput{
+					Override: func(original emaildelivery.EmailDeliveryInterface) emaildelivery.EmailDeliveryInterface {
+						sendEmail := func(input emaildelivery.EmailType, _ supertokens.UserContext) error {
+							pr := input.PasswordReset
+							return m.SendPasswordResetEmail(pr.User.Email, pr.PasswordResetLink)
+						}
+						original.SendEmail = &sendEmail
+						return original
+					},
+				},
+			}),
 			emailverification.Init(evmodels.TypeInput{
 				Mode: evmodels.ModeOptional,
 				EmailDelivery: &emaildelivery.TypeInput{
