@@ -37,7 +37,9 @@ type Monitor struct {
 }
 
 type CreateMonitorRequest struct {
-	OrgID    string      `json:"orgId" binding:"required"`
+	// OrgID is optional: empty means a solo (FREE/PRO) monitor owned directly by
+	// the user; a value means the monitor belongs to that organization.
+	OrgID    string      `json:"orgId"`
 	Name     string      `json:"name" binding:"required"`
 	Type     MonitorType `json:"type" binding:"required,oneof=HTTP PORT PING"`
 	Target   string      `json:"target" binding:"required"`

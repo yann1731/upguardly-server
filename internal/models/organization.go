@@ -54,7 +54,7 @@ type Invitation struct {
 
 type Subscription struct {
 	ID                   string     `json:"id"`
-	OrgID                string     `json:"orgId"`
+	UserID               string     `json:"userId"`
 	Plan                 string     `json:"plan"`
 	Status               string     `json:"status"`
 	StripeCustomerID     *string    `json:"stripeCustomerId,omitempty"`
@@ -68,15 +68,10 @@ type Subscription struct {
 
 // --- Request types ---
 
-// CreateOrgRequest initiates the checkout-first org-creation flow. Creating an
-// organization requires a paid plan, so the request carries the chosen plan and
-// optional relative redirect paths; the org itself is created by the Stripe
-// checkout-completed webhook once payment succeeds.
+// CreateOrgRequest creates an organization. Org creation is gated to ENTERPRISE
+// accounts (checked in the handler); the org's plan derives from its owner.
 type CreateOrgRequest struct {
-	Name        string `json:"name" binding:"required,min=2,max=100"`
-	Plan        string `json:"plan" binding:"required,oneof=PRO ENTERPRISE"`
-	SuccessPath string `json:"successPath"`
-	CancelPath  string `json:"cancelPath"`
+	Name string `json:"name" binding:"required,min=2,max=100"`
 }
 
 type UpdateOrgRequest struct {
@@ -99,7 +94,7 @@ type CreateCheckoutRequest struct {
 }
 
 type UpsertSubscriptionParams struct {
-	OrgID                string
+	UserID               string
 	Plan                 string
 	Status               string
 	StripeCustomerID     *string

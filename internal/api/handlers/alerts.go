@@ -95,7 +95,9 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
 		return
 	}
-	plan := "FREE"
+	// A solo monitor is governed by its owner's plan; an org monitor by the org
+	// owner's plan.
+	plan := h.planForUser(c.Request.Context(), userId)
 	if monitor.OrgID != nil {
 		plan = h.planForOrg(c.Request.Context(), *monitor.OrgID)
 	}

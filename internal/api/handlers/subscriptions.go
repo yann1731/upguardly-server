@@ -19,13 +19,13 @@ import (
 )
 
 func (h *Handlers) GetSubscription(c *gin.Context) {
-	orgId, ok := middleware.GetOrgID(c)
+	userId, ok := middleware.GetUserID(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing organization ID"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
-	sub, err := h.store.GetSubscription(c.Request.Context(), orgId)
+	sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
 	if err != nil {
 		// Return a default free subscription if none exists
 		c.JSON(http.StatusOK, gin.H{"plan": "FREE", "status": "ACTIVE"})
@@ -36,9 +36,9 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 }
 
 func (h *Handlers) CreateCheckout(c *gin.Context) {
-	orgId, ok := middleware.GetOrgID(c)
+	userId, ok := middleware.GetUserID(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing organization ID"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
@@ -66,7 +66,7 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		websiteDomain = "http://localhost:3000"
 	}
 
-	successURL, cancelURL, err := buildRedirectURLs(websiteDomain, req.SuccessPath, req.CancelPath, orgId)
+	successURL, cancelURL, err := buildRedirectURLs(websiteDomain, req.SuccessPath, req.CancelPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -78,13 +78,9 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		return
 	}
 
-	org, err := h.store.GetOrganization(c.Request.Context(), orgId)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Organization not found"})
-		return
-	}
-
-	customerID, err := h.stripe.EnsureCustomer(orgId, org.Name)
+	// The Stripe customer is keyed on the user (the billing subject); user_id
+	// metadata is what the webhooks resolve the subscription back to.
+	customerID, err := h.stripe.EnsureCustomer(userId, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create billing customer"})
 		return
@@ -100,9 +96,9 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 }
 
 func (h *Handlers) CreatePortal(c *gin.Context) {
-	orgId, ok := middleware.GetOrgID(c)
+	userId, ok := middleware.GetUserID(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing organization ID"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
@@ -132,7 +128,7 @@ func (h *Handlers) CreatePortal(c *gin.Context) {
 		return
 	}
 
-	sub, err := h.store.GetSubscription(c.Request.Context(), orgId)
+	sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
 	if err != nil || sub.StripeCustomerID == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "No billing account found"})
 		return
@@ -150,13 +146,13 @@ func (h *Handlers) CreatePortal(c *gin.Context) {
 // buildRedirectURLs constructs absolute success and cancel URLs by combining the
 // trusted websiteDomain with relative paths provided by the client. Relative paths
 // must start with "/" and must not contain scheme or host components.
-func buildRedirectURLs(websiteDomain, successPath, cancelPath, orgId string) (string, string, error) {
-	// Default fallback paths if client didn't provide them.
+func buildRedirectURLs(websiteDomain, successPath, cancelPath string) (string, string, error) {
+	// Default to the account billing page if the client didn't provide paths.
 	if successPath == "" {
-		successPath = fmt.Sprintf("/organizations/%s", orgId)
+		successPath = "/billing"
 	}
 	if cancelPath == "" {
-		cancelPath = fmt.Sprintf("/organizations/%s", orgId)
+		cancelPath = "/billing"
 	}
 
 	successURL, err := buildSingleRedirectURL(websiteDomain, successPath)
@@ -207,8 +203,6 @@ func (h *Handlers) StripeWebhook(c *gin.Context) {
 	}
 
 	switch event.Type {
-	case "checkout.session.completed":
-		h.handleCheckoutCompleted(c, event)
 	case "customer.subscription.created", "customer.subscription.updated":
 		h.handleSubscriptionUpdated(c, event)
 	case "customer.subscription.deleted":
@@ -220,92 +214,6 @@ func (h *Handlers) StripeWebhook(c *gin.Context) {
 	}
 }
 
-// handleCheckoutCompleted creates the organization after a successful
-// checkout-first payment. The org never exists until this fires, so this is the
-// single place that turns a paid checkout into an Organization + OWNER member +
-// active Subscription. It is idempotent: a retried/duplicate event is a no-op
-// once the user already owns an org.
-func (h *Handlers) handleCheckoutCompleted(c *gin.Context, event stripe.Event) {
-	var session stripe.CheckoutSession
-	if err := json.Unmarshal(event.Data.Raw, &session); err != nil {
-		log.Printf("stripe webhook: failed to unmarshal checkout session: %v", err)
-		c.JSON(http.StatusOK, gin.H{"received": true})
-		return
-	}
-
-	// Only org-creation checkouts (subscription mode, carrying our metadata) are
-	// handled here; everything else is acknowledged and ignored.
-	userID := session.Metadata["user_id"]
-	orgName := session.Metadata["org_name"]
-	plan := session.Metadata["plan"]
-	if userID == "" || orgName == "" || plan == "" {
-		c.JSON(http.StatusOK, gin.H{"received": true})
-		return
-	}
-
-	// Idempotency: if the user already owns an org, this is a duplicate delivery.
-	if existing, err := h.store.ListOrganizations(c.Request.Context(), userID); err == nil && len(existing) > 0 {
-		c.JSON(http.StatusOK, gin.H{"received": true})
-		return
-	}
-
-	org, err := h.store.CreateOrganization(c.Request.Context(), userID, orgName)
-	if err != nil {
-		log.Printf("stripe webhook: failed to create org for user %s: %v", userID, err)
-		c.JSON(http.StatusOK, gin.H{"received": true})
-		return
-	}
-
-	var customerID string
-	if session.Customer != nil {
-		customerID = session.Customer.ID
-	}
-	// Stamp org_id onto the customer so future subscription.* events resolve it.
-	if customerID != "" {
-		if err := h.stripe.SetCustomerOrgID(customerID, org.ID); err != nil {
-			log.Printf("stripe webhook: failed to set org_id on customer %s: %v", customerID, err)
-		}
-	}
-
-	params := models.UpsertSubscriptionParams{
-		OrgID:  org.ID,
-		Plan:   plan,
-		Status: "ACTIVE",
-	}
-	if customerID != "" {
-		params.StripeCustomerID = &customerID
-	}
-
-	// Pull full subscription details (period, price, status) so the record is
-	// complete from the start rather than waiting on a follow-up event.
-	if session.Subscription != nil && session.Subscription.ID != "" {
-		subID := session.Subscription.ID
-		params.StripeSubscriptionID = &subID
-		if sub, err := h.stripe.GetSubscription(subID); err == nil {
-			params.Status = mapStripeStatus(string(sub.Status))
-			start := time.Unix(sub.CurrentPeriodStart, 0)
-			end := time.Unix(sub.CurrentPeriodEnd, 0)
-			params.CurrentPeriodStart = &start
-			params.CurrentPeriodEnd = &end
-			if len(sub.Items.Data) > 0 {
-				priceID := sub.Items.Data[0].Price.ID
-				params.StripePriceID = &priceID
-				if p, perr := h.planFromPriceID(priceID); perr == nil {
-					params.Plan = p
-				}
-			}
-		} else {
-			log.Printf("stripe webhook: failed to fetch subscription %s: %v", subID, err)
-		}
-	}
-
-	if _, err := h.store.UpsertSubscription(c.Request.Context(), params); err != nil {
-		log.Printf("stripe webhook: failed to upsert subscription for org %s: %v", org.ID, err)
-	}
-
-	c.JSON(http.StatusOK, gin.H{"received": true})
-}
-
 func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event) {
 	var sub stripe.Subscription
 	if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
@@ -314,8 +222,8 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	orgID, ok := sub.Customer.Metadata["org_id"]
-	if !ok || orgID == "" {
+	userID, ok := sub.Customer.Metadata["user_id"]
+	if !ok || userID == "" {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
@@ -333,13 +241,13 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 
 	plan, err := h.planFromPriceID(priceID)
 	if err != nil {
-		log.Printf("stripe webhook: unrecognised price ID %q for org %s — ignoring event", priceID, orgID)
+		log.Printf("stripe webhook: unrecognised price ID %q for user %s — ignoring event", priceID, userID)
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
 
 	_, upsertErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
-		OrgID:                orgID,
+		UserID:               userID,
 		Plan:                 plan,
 		Status:               status,
 		StripeCustomerID:     &customerID,
@@ -349,7 +257,7 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		CurrentPeriodEnd:     &end,
 	})
 	if upsertErr != nil {
-		log.Printf("stripe webhook: failed to upsert subscription for org %s: %v", orgID, upsertErr)
+		log.Printf("stripe webhook: failed to upsert subscription for user %s: %v", userID, upsertErr)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"received": true})
@@ -362,19 +270,19 @@ func (h *Handlers) handleSubscriptionDeleted(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	orgID, ok := sub.Customer.Metadata["org_id"]
-	if !ok || orgID == "" {
+	userID, ok := sub.Customer.Metadata["user_id"]
+	if !ok || userID == "" {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
 
 	_, err := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
-		OrgID:  orgID,
+		UserID: userID,
 		Plan:   "FREE",
 		Status: "CANCELED",
 	})
 	if err != nil {
-		log.Printf("stripe webhook: failed to cancel subscription for org %s: %v", orgID, err)
+		log.Printf("stripe webhook: failed to cancel subscription for user %s: %v", userID, err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"received": true})
@@ -392,25 +300,25 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		return
 	}
 
-	orgID, ok := inv.Customer.Metadata["org_id"]
-	if !ok || orgID == "" {
+	userID, ok := inv.Customer.Metadata["user_id"]
+	if !ok || userID == "" {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
 
 	// Fetch current plan to preserve it while marking payment as past-due.
 	existingPlan := "PRO"
-	if sub, err := h.store.GetSubscription(c.Request.Context(), orgID); err == nil {
+	if sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userID); err == nil {
 		existingPlan = sub.Plan
 	}
 
 	_, err := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
-		OrgID:  orgID,
+		UserID: userID,
 		Plan:   existingPlan,
 		Status: "PAST_DUE",
 	})
 	if err != nil {
-		log.Printf("stripe webhook: failed to mark past_due for org %s: %v", orgID, err)
+		log.Printf("stripe webhook: failed to mark past_due for user %s: %v", userID, err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"received": true})

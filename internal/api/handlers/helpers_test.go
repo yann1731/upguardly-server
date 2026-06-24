@@ -51,7 +51,7 @@ func aMembership() *models.OrganizationMember {
 func aSubscription(plan string) *models.Subscription {
 	return &models.Subscription{
 		ID:     "sub-1",
-		OrgID:  "test-org-id",
+		UserID: testUserID,
 		Plan:   plan,
 		Status: "ACTIVE",
 	}

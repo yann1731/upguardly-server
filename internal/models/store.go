@@ -16,6 +16,7 @@ type Store interface {
 	// Monitors
 	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool) (*Monitor, error)
 	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
+	CountMonitorsByUser(ctx context.Context, userId string) (int, error)
 	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
 	GetMonitor(ctx context.Context, id, userId string) (*Monitor, error)
 	UpdateMonitor(ctx context.Context, id, userId string, req UpdateMonitorRequest) (*Monitor, error)
@@ -52,7 +53,7 @@ type Store interface {
 	AcceptInvitation(ctx context.Context, token, userId string) (*OrganizationMember, error)
 	RevokeInvitation(ctx context.Context, id string) error
 
-	// Subscriptions
-	GetSubscription(ctx context.Context, orgId string) (*Subscription, error)
+	// Subscriptions (keyed on the user — the billing subject)
+	GetSubscriptionByUser(ctx context.Context, userId string) (*Subscription, error)
 	UpsertSubscription(ctx context.Context, params UpsertSubscriptionParams) (*Subscription, error)
 }

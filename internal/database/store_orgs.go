@@ -245,9 +245,9 @@ func (s *PrismaStore) RevokeInvitation(ctx context.Context, id string) error {
 
 // ── Subscription ─────────────────────────────────────────────────────────────
 
-func (s *PrismaStore) GetSubscription(ctx context.Context, orgId string) (*models.Subscription, error) {
+func (s *PrismaStore) GetSubscriptionByUser(ctx context.Context, userId string) (*models.Subscription, error) {
 	sub, err := s.client.Prisma.Subscription.FindUnique(
-		db.Subscription.OrganizationID.Equals(orgId),
+		db.Subscription.UserID.Equals(userId),
 	).Exec(ctx)
 	if err != nil {
 		return nil, models.ErrNotFound
@@ -277,7 +277,7 @@ func (s *PrismaStore) UpsertSubscription(ctx context.Context, params models.Upse
 	}
 
 	existing, err := s.client.Prisma.Subscription.FindUnique(
-		db.Subscription.OrganizationID.Equals(params.OrgID),
+		db.Subscription.UserID.Equals(params.UserID),
 	).Exec(ctx)
 
 	if err != nil {
@@ -304,7 +304,7 @@ func (s *PrismaStore) UpsertSubscription(ctx context.Context, params models.Upse
 		}
 
 		sub, createErr := s.client.Prisma.Subscription.CreateOne(
-			db.Subscription.Organization.Link(db.Organization.ID.Equals(params.OrgID)),
+			db.Subscription.UserID.Set(params.UserID),
 			createParams...,
 		).Exec(ctx)
 		if createErr != nil {
@@ -362,7 +362,7 @@ func invitationToModel(i *db.InvitationModel) *models.Invitation {
 func subscriptionToModel(s *db.SubscriptionModel) *models.Subscription {
 	sub := &models.Subscription{
 		ID:        s.ID,
-		OrgID:     s.OrganizationID,
+		UserID:    s.UserID,
 		Plan:      string(s.Plan),
 		Status:    string(s.Status),
 		CreatedAt: s.CreatedAt,

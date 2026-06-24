@@ -63,6 +63,9 @@ func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, _, _ 
 func (m *mockStore) CountMonitorsByOrg(_ context.Context, _ string) (int, error) {
 	return m.monitorCount, m.monitorCountErr
 }
+func (m *mockStore) CountMonitorsByUser(_ context.Context, _ string) (int, error) {
+	return m.monitorCount, m.monitorCountErr
+}
 func (m *mockStore) ListMonitors(_ context.Context, _ string) ([]models.Monitor, error) {
 	return m.monitorsResult, m.monitorsErr
 }
@@ -161,7 +164,7 @@ func (m *mockStore) RevokeInvitation(_ context.Context, _ string) error { return
 
 // ── Subscription stubs ────────────────────────────────────────────────────────
 
-func (m *mockStore) GetSubscription(_ context.Context, _ string) (*models.Subscription, error) {
+func (m *mockStore) GetSubscriptionByUser(_ context.Context, _ string) (*models.Subscription, error) {
 	if m.subResult == nil && m.subErr == nil {
 		return nil, models.ErrNotFound
 	}
@@ -212,13 +215,6 @@ type fakeStripe struct {
 	ensureErr   error
 	checkoutErr error
 	portalErr   error
-	getSub      *stripe.Subscription
-	getSubErr   error
-
-	// Captured calls for assertions.
-	setOrgIDCustomer string
-	setOrgIDOrg      string
-	lastCheckoutMeta map[string]string
 }
 
 func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
@@ -234,22 +230,7 @@ func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
 func (f *fakeStripe) EnsureCustomer(_, _ string) (string, error) {
 	return f.customerID, f.ensureErr
 }
-func (f *fakeStripe) EnsureCustomerForUser(_, _ string) (string, error) {
-	return f.customerID, f.ensureErr
-}
-func (f *fakeStripe) SetCustomerOrgID(customerID, orgID string) error {
-	f.setOrgIDCustomer = customerID
-	f.setOrgIDOrg = orgID
-	return nil
-}
-func (f *fakeStripe) GetSubscription(_ string) (*stripe.Subscription, error) {
-	return f.getSub, f.getSubErr
-}
 func (f *fakeStripe) CreateCheckoutSession(_, _, _, _ string) (string, error) {
-	return f.checkoutURL, f.checkoutErr
-}
-func (f *fakeStripe) CreateOrgCheckoutSession(_, _, _, _ string, metadata map[string]string) (string, error) {
-	f.lastCheckoutMeta = metadata
 	return f.checkoutURL, f.checkoutErr
 }
 func (f *fakeStripe) CreatePortalSession(_, _ string) (string, error) {

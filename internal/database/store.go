@@ -20,15 +20,22 @@ func NewPrismaStore(client *Client) *PrismaStore {
 // ── Monitor ──────────────────────────────────────────────────────────────────
 
 func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool) (*models.Monitor, error) {
+	optional := []db.MonitorSetParam{
+		db.Monitor.Interval.Set(interval),
+		db.Monitor.Timeout.Set(timeout),
+		db.Monitor.Enabled.Set(enabled),
+	}
+	// Solo (FREE/PRO) monitors have no org; only link one when given.
+	if orgId != "" {
+		optional = append(optional, db.Monitor.Org.Link(db.Organization.ID.Equals(orgId)))
+	}
+
 	m, err := s.client.Prisma.Monitor.CreateOne(
 		db.Monitor.UserID.Set(userId),
 		db.Monitor.Name.Set(name),
 		db.Monitor.Type.Set(db.MonitorType(monitorType)),
 		db.Monitor.Target.Set(target),
-		db.Monitor.Interval.Set(interval),
-		db.Monitor.Timeout.Set(timeout),
-		db.Monitor.Enabled.Set(enabled),
-		db.Monitor.Org.Link(db.Organization.ID.Equals(orgId)),
+		optional...,
 	).Exec(ctx)
 	if err != nil {
 		return nil, err
@@ -39,6 +46,19 @@ func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, orgId, name, mo
 func (s *PrismaStore) CountMonitorsByOrg(ctx context.Context, orgId string) (int, error) {
 	ms, err := s.client.Prisma.Monitor.FindMany(
 		db.Monitor.OrgID.Equals(orgId),
+	).Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(ms), nil
+}
+
+// CountMonitorsByUser counts a user's solo (org-less) monitors, used to enforce
+// FREE/PRO plan limits for accounts not operating inside an organization.
+func (s *PrismaStore) CountMonitorsByUser(ctx context.Context, userId string) (int, error) {
+	ms, err := s.client.Prisma.Monitor.FindMany(
+		db.Monitor.UserID.Equals(userId),
+		db.Monitor.OrgID.IsNull(),
 	).Exec(ctx)
 	if err != nil {
 		return 0, err

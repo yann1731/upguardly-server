@@ -90,6 +90,12 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 			// Current authenticated user (identity/email for the settings page).
 			protected.GET("/me", h.GetMe)
 
+			// Subscription — billing is per-user (the account), not per-org.
+			// FREE/PRO are single-user; ENTERPRISE additionally unlocks orgs.
+			protected.GET("/subscription", h.GetSubscription)
+			protected.POST("/subscription", middleware.StrictRateLimit(), h.CreateCheckout)
+			protected.POST("/subscription/portal", middleware.StrictRateLimit(), h.CreatePortal)
+
 			// Invitation accept — requires auth (to know which user is accepting).
 			protected.POST("/invitations/:token/accept", middleware.StrictRateLimit(), h.AcceptInvitation)
 
@@ -137,11 +143,6 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 					org.POST("/invitations", middleware.RequireOrgRole(store, models.OrgRoleAdmin), middleware.StrictRateLimit(), h.CreateInvitation)
 					org.GET("/invitations", middleware.RequireOrgRole(store, models.OrgRoleAdmin), h.ListInvitations)
 					org.DELETE("/invitations/:invId", middleware.RequireOrgRole(store, models.OrgRoleAdmin), h.RevokeInvitation)
-
-					// Subscription
-					org.GET("/subscription", middleware.RequireOrgRole(store, models.OrgRoleViewer), h.GetSubscription)
-					org.POST("/subscription", middleware.RequireOrgRole(store, models.OrgRoleOwner), middleware.StrictRateLimit(), h.CreateCheckout)
-					org.POST("/subscription/portal", middleware.RequireOrgRole(store, models.OrgRoleOwner), middleware.StrictRateLimit(), h.CreatePortal)
 				}
 			}
 		}

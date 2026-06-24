@@ -35,14 +35,15 @@ func TestCreateMonitor(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
-	t.Run("missing orgId returns 400", func(t *testing.T) {
-		store := &mockStore{}
+	t.Run("missing orgId creates a solo monitor (201)", func(t *testing.T) {
+		// A monitor with no org is a solo (FREE/PRO) monitor owned by the user.
+		store := &mockStore{monitorResult: aMonitor()}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
 		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"https://example.com"}`)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 
 	t.Run("invalid type returns 400", func(t *testing.T) {
@@ -77,10 +78,12 @@ func TestCreateMonitor(t *testing.T) {
 	})
 
 	t.Run("PRO plan allows beyond free limit", func(t *testing.T) {
-		// PRO caps at 50; org has 6 monitors — should succeed.
+		// PRO caps at 50; org has 6 monitors — should succeed. The org's plan is
+		// its owner's plan, so the org resolves to its owner (testUserID) → PRO.
 		store := &mockStore{
 			monitorResult:    aMonitor(),
 			membershipResult: aMembership(),
+			orgResult:        &models.Organization{ID: "test-org-id", OwnerID: testUserID},
 			subResult:        aSubscription("PRO"),
 			monitorCount:     6,
 		}

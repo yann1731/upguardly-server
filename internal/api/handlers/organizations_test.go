@@ -11,59 +11,69 @@ import (
 )
 
 func TestCreateOrg(t *testing.T) {
-	// Creating an org is now a paid action: CreateOrg starts a Stripe Checkout
-	// session and returns its URL; the org is created later by the webhook.
-	t.Run("happy path returns checkout url", func(t *testing.T) {
-		store := &mockStore{}
-		fs := &fakeStripe{proPriceID: "price_pro", customerID: "cus_1", checkoutURL: "https://checkout.example/session"}
-		router, h := newOrgRouter(store, fs)
-		router.POST("/v1/organizations", h.CreateOrg)
-
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme","plan":"PRO"}`)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), "https://checkout.example/session")
-		assert.Equal(t, "Acme", fs.lastCheckoutMeta["org_name"])
-		assert.Equal(t, "PRO", fs.lastCheckoutMeta["plan"])
-		assert.Equal(t, testUserID, fs.lastCheckoutMeta["user_id"])
-	})
-
-	t.Run("billing not configured returns 503", func(t *testing.T) {
-		store := &mockStore{}
-		router, h := newOrgRouter(store, nil) // nil stripe
-		router.POST("/v1/organizations", h.CreateOrg)
-
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme","plan":"PRO"}`)
-
-		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	})
-
-	t.Run("user already in an org returns 409", func(t *testing.T) {
-		store := &mockStore{orgsResult: []models.Organization{{ID: "org-1", Name: "Existing"}}}
-		router, h := newOrgRouter(store, &fakeStripe{proPriceID: "price_pro"})
-		router.POST("/v1/organizations", h.CreateOrg)
-
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Another","plan":"PRO"}`)
-
-		assert.Equal(t, http.StatusConflict, w.Code)
-	})
-
-	t.Run("missing plan returns 400", func(t *testing.T) {
-		store := &mockStore{}
-		router, h := newOrgRouter(store, &fakeStripe{proPriceID: "price_pro"})
+	// Org creation is an ENTERPRISE-only feature, created synchronously.
+	t.Run("enterprise account creates org (201)", func(t *testing.T) {
+		store := &mockStore{
+			subResult: aSubscription("ENTERPRISE"),
+			orgResult: &models.Organization{ID: "org-1", Name: "Acme"},
+		}
+		router, h := newTestRouter(store)
 		router.POST("/v1/organizations", h.CreateOrg)
 
 		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme"}`)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, http.StatusCreated, w.Code)
+	})
+
+	t.Run("non-enterprise account is rejected (402)", func(t *testing.T) {
+		store := &mockStore{subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/organizations", h.CreateOrg)
+
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("free account (no subscription) is rejected (402)", func(t *testing.T) {
+		store := &mockStore{} // GetSubscriptionByUser → ErrNotFound → FREE
+		router, h := newTestRouter(store)
+		router.POST("/v1/organizations", h.CreateOrg)
+
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("user already in an org returns 409", func(t *testing.T) {
+		store := &mockStore{
+			subResult:  aSubscription("ENTERPRISE"),
+			orgsResult: []models.Organization{{ID: "org-1", Name: "Existing"}},
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/organizations", h.CreateOrg)
+
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Another"}`)
+
+		assert.Equal(t, http.StatusConflict, w.Code)
+	})
+
+	t.Run("duplicate name returns 409", func(t *testing.T) {
+		store := &mockStore{subResult: aSubscription("ENTERPRISE"), createOrgErr: models.ErrConflict}
+		router, h := newTestRouter(store)
+		router.POST("/v1/organizations", h.CreateOrg)
+
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Taken"}`)
+
+		assert.Equal(t, http.StatusConflict, w.Code)
 	})
 
 	t.Run("name too short returns 400", func(t *testing.T) {
-		store := &mockStore{}
-		router, h := newOrgRouter(store, &fakeStripe{proPriceID: "price_pro"})
+		store := &mockStore{subResult: aSubscription("ENTERPRISE")}
+		router, h := newTestRouter(store)
 		router.POST("/v1/organizations", h.CreateOrg)
 
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"A","plan":"PRO"}`)
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"A"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
@@ -111,32 +121,10 @@ func TestAcceptInvitation(t *testing.T) {
 }
 
 func TestDeleteOrg(t *testing.T) {
-	t.Run("active subscription blocks deletion with 409", func(t *testing.T) {
-		store := &mockStore{subResult: aSubscription("PRO")} // Status ACTIVE
-		router, h := newOrgRouter(store, nil)
-		router.DELETE("/v1/organizations/:id", h.DeleteOrg)
-
-		w := doRequest(router, "DELETE", "/v1/organizations/test-org-id", "")
-
-		assert.Equal(t, http.StatusConflict, w.Code)
-		assert.False(t, store.deleteOrgCalled)
-	})
-
-	t.Run("canceled subscription allows deletion with 204", func(t *testing.T) {
-		sub := aSubscription("FREE")
-		sub.Status = "CANCELED"
-		store := &mockStore{subResult: sub}
-		router, h := newOrgRouter(store, nil)
-		router.DELETE("/v1/organizations/:id", h.DeleteOrg)
-
-		w := doRequest(router, "DELETE", "/v1/organizations/test-org-id", "")
-
-		assert.Equal(t, http.StatusNoContent, w.Code)
-		assert.True(t, store.deleteOrgCalled)
-	})
-
-	t.Run("no subscription allows deletion with 204", func(t *testing.T) {
-		store := &mockStore{} // GetSubscription → ErrNotFound
+	// The subscription belongs to the owner's account, not the org, so deletion
+	// is no longer gated on subscription status.
+	t.Run("deletes org with 204", func(t *testing.T) {
+		store := &mockStore{}
 		router, h := newOrgRouter(store, nil)
 		router.DELETE("/v1/organizations/:id", h.DeleteOrg)
 
