@@ -7,6 +7,7 @@ import (
 	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
 	checkoutsession "github.com/stripe/stripe-go/v76/checkout/session"
 	"github.com/stripe/stripe-go/v76/customer"
+	"github.com/stripe/stripe-go/v76/subscription"
 	"github.com/stripe/stripe-go/v76/webhook"
 
 	"upguardly-backend/internal/config"
@@ -58,6 +59,87 @@ func (c *Client) EnsureCustomer(orgID, orgName string) (string, error) {
 		return "", fmt.Errorf("failed to create Stripe customer: %w", err)
 	}
 	return cust.ID, nil
+}
+
+// EnsureCustomerForUser looks up or creates a Stripe customer keyed to a user,
+// used for the checkout-first org-creation flow where no org exists yet. The
+// resulting customer is tagged with user_id metadata; org_id is added later via
+// SetCustomerOrgID once the org has been created by the webhook.
+func (c *Client) EnsureCustomerForUser(userID, name string) (string, error) {
+	iter := customer.List(&stripe.CustomerListParams{})
+	for iter.Next() {
+		cust := iter.Customer()
+		// Only reuse a user-keyed customer that is not yet bound to an org, so we
+		// never collide with an existing org's billing customer.
+		if cust.Metadata["user_id"] == userID && cust.Metadata["org_id"] == "" {
+			return cust.ID, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return "", fmt.Errorf("failed to search customers: %w", err)
+	}
+
+	params := &stripe.CustomerParams{Name: stripe.String(name)}
+	params.AddMetadata("user_id", userID)
+
+	cust, err := customer.New(params)
+	if err != nil {
+		return "", fmt.Errorf("failed to create Stripe customer: %w", err)
+	}
+	return cust.ID, nil
+}
+
+// SetCustomerOrgID stamps the org_id metadata onto a customer once the org has
+// been created, so the subscription.updated/deleted/payment_failed webhooks
+// (which resolve the org via customer metadata) work for it going forward.
+func (c *Client) SetCustomerOrgID(customerID, orgID string) error {
+	params := &stripe.CustomerParams{}
+	params.AddMetadata("org_id", orgID)
+	if _, err := customer.Update(customerID, params); err != nil {
+		return fmt.Errorf("failed to update customer metadata: %w", err)
+	}
+	return nil
+}
+
+// GetSubscription fetches a subscription from Stripe by ID. Used by the
+// checkout-completed webhook to populate plan period dates and price at creation.
+func (c *Client) GetSubscription(subID string) (*stripe.Subscription, error) {
+	s, err := subscription.Get(subID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch subscription: %w", err)
+	}
+	return s, nil
+}
+
+// CreateOrgCheckoutSession creates a Checkout session for the checkout-first
+// org-creation flow. The provided metadata (user_id, org_name, plan) is attached
+// to both the session and the resulting subscription so the webhook can create
+// the org after payment succeeds.
+func (c *Client) CreateOrgCheckoutSession(customerID, priceID, successURL, cancelURL string, metadata map[string]string) (string, error) {
+	params := &stripe.CheckoutSessionParams{
+		Customer: stripe.String(customerID),
+		Mode:     stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		LineItems: []*stripe.CheckoutSessionLineItemParams{
+			{
+				Price:    stripe.String(priceID),
+				Quantity: stripe.Int64(1),
+			},
+		},
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+		SubscriptionData: &stripe.CheckoutSessionSubscriptionDataParams{
+			Metadata: metadata,
+		},
+	}
+	for k, v := range metadata {
+		params.AddMetadata(k, v)
+	}
+
+	s, err := checkoutsession.New(params)
+	if err != nil {
+		return "", fmt.Errorf("failed to create checkout session: %w", err)
+	}
+	return s.URL, nil
 }
 
 // CreateCheckoutSession creates a Stripe Checkout session and returns the URL.

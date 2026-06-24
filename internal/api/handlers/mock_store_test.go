@@ -212,6 +212,13 @@ type fakeStripe struct {
 	ensureErr   error
 	checkoutErr error
 	portalErr   error
+	getSub      *stripe.Subscription
+	getSubErr   error
+
+	// Captured calls for assertions.
+	setOrgIDCustomer string
+	setOrgIDOrg      string
+	lastCheckoutMeta map[string]string
 }
 
 func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
@@ -227,7 +234,22 @@ func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
 func (f *fakeStripe) EnsureCustomer(_, _ string) (string, error) {
 	return f.customerID, f.ensureErr
 }
+func (f *fakeStripe) EnsureCustomerForUser(_, _ string) (string, error) {
+	return f.customerID, f.ensureErr
+}
+func (f *fakeStripe) SetCustomerOrgID(customerID, orgID string) error {
+	f.setOrgIDCustomer = customerID
+	f.setOrgIDOrg = orgID
+	return nil
+}
+func (f *fakeStripe) GetSubscription(_ string) (*stripe.Subscription, error) {
+	return f.getSub, f.getSubErr
+}
 func (f *fakeStripe) CreateCheckoutSession(_, _, _, _ string) (string, error) {
+	return f.checkoutURL, f.checkoutErr
+}
+func (f *fakeStripe) CreateOrgCheckoutSession(_, _, _, _ string, metadata map[string]string) (string, error) {
+	f.lastCheckoutMeta = metadata
 	return f.checkoutURL, f.checkoutErr
 }
 func (f *fakeStripe) CreatePortalSession(_, _ string) (string, error) {

@@ -8,7 +8,11 @@ import "github.com/stripe/stripe-go/v76"
 type StripeService interface {
 	PriceIDForPlan(plan string) (string, error)
 	EnsureCustomer(orgID, orgName string) (string, error)
+	EnsureCustomerForUser(userID, name string) (string, error)
+	SetCustomerOrgID(customerID, orgID string) error
+	GetSubscription(subID string) (*stripe.Subscription, error)
 	CreateCheckoutSession(customerID, priceID, successURL, cancelURL string) (string, error)
+	CreateOrgCheckoutSession(customerID, priceID, successURL, cancelURL string, metadata map[string]string) (string, error)
 	CreatePortalSession(customerID, returnURL string) (string, error)
 	ParseWebhook(payload []byte, sig string) (stripe.Event, error)
 }

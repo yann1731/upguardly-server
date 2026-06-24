@@ -207,6 +207,8 @@ func (h *Handlers) StripeWebhook(c *gin.Context) {
 	}
 
 	switch event.Type {
+	case "checkout.session.completed":
+		h.handleCheckoutCompleted(c, event)
 	case "customer.subscription.created", "customer.subscription.updated":
 		h.handleSubscriptionUpdated(c, event)
 	case "customer.subscription.deleted":
@@ -216,6 +218,92 @@ func (h *Handlers) StripeWebhook(c *gin.Context) {
 	default:
 		c.JSON(http.StatusOK, gin.H{"received": true})
 	}
+}
+
+// handleCheckoutCompleted creates the organization after a successful
+// checkout-first payment. The org never exists until this fires, so this is the
+// single place that turns a paid checkout into an Organization + OWNER member +
+// active Subscription. It is idempotent: a retried/duplicate event is a no-op
+// once the user already owns an org.
+func (h *Handlers) handleCheckoutCompleted(c *gin.Context, event stripe.Event) {
+	var session stripe.CheckoutSession
+	if err := json.Unmarshal(event.Data.Raw, &session); err != nil {
+		log.Printf("stripe webhook: failed to unmarshal checkout session: %v", err)
+		c.JSON(http.StatusOK, gin.H{"received": true})
+		return
+	}
+
+	// Only org-creation checkouts (subscription mode, carrying our metadata) are
+	// handled here; everything else is acknowledged and ignored.
+	userID := session.Metadata["user_id"]
+	orgName := session.Metadata["org_name"]
+	plan := session.Metadata["plan"]
+	if userID == "" || orgName == "" || plan == "" {
+		c.JSON(http.StatusOK, gin.H{"received": true})
+		return
+	}
+
+	// Idempotency: if the user already owns an org, this is a duplicate delivery.
+	if existing, err := h.store.ListOrganizations(c.Request.Context(), userID); err == nil && len(existing) > 0 {
+		c.JSON(http.StatusOK, gin.H{"received": true})
+		return
+	}
+
+	org, err := h.store.CreateOrganization(c.Request.Context(), userID, orgName)
+	if err != nil {
+		log.Printf("stripe webhook: failed to create org for user %s: %v", userID, err)
+		c.JSON(http.StatusOK, gin.H{"received": true})
+		return
+	}
+
+	var customerID string
+	if session.Customer != nil {
+		customerID = session.Customer.ID
+	}
+	// Stamp org_id onto the customer so future subscription.* events resolve it.
+	if customerID != "" {
+		if err := h.stripe.SetCustomerOrgID(customerID, org.ID); err != nil {
+			log.Printf("stripe webhook: failed to set org_id on customer %s: %v", customerID, err)
+		}
+	}
+
+	params := models.UpsertSubscriptionParams{
+		OrgID:  org.ID,
+		Plan:   plan,
+		Status: "ACTIVE",
+	}
+	if customerID != "" {
+		params.StripeCustomerID = &customerID
+	}
+
+	// Pull full subscription details (period, price, status) so the record is
+	// complete from the start rather than waiting on a follow-up event.
+	if session.Subscription != nil && session.Subscription.ID != "" {
+		subID := session.Subscription.ID
+		params.StripeSubscriptionID = &subID
+		if sub, err := h.stripe.GetSubscription(subID); err == nil {
+			params.Status = mapStripeStatus(string(sub.Status))
+			start := time.Unix(sub.CurrentPeriodStart, 0)
+			end := time.Unix(sub.CurrentPeriodEnd, 0)
+			params.CurrentPeriodStart = &start
+			params.CurrentPeriodEnd = &end
+			if len(sub.Items.Data) > 0 {
+				priceID := sub.Items.Data[0].Price.ID
+				params.StripePriceID = &priceID
+				if p, perr := h.planFromPriceID(priceID); perr == nil {
+					params.Plan = p
+				}
+			}
+		} else {
+			log.Printf("stripe webhook: failed to fetch subscription %s: %v", subID, err)
+		}
+	}
+
+	if _, err := h.store.UpsertSubscription(c.Request.Context(), params); err != nil {
+		log.Printf("stripe webhook: failed to upsert subscription for org %s: %v", org.ID, err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"received": true})
 }
 
 func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event) {

@@ -11,42 +11,59 @@ import (
 )
 
 func TestCreateOrg(t *testing.T) {
-	t.Run("first org returns 201", func(t *testing.T) {
-		store := &mockStore{orgResult: &models.Organization{ID: "org-1", Name: "Acme"}}
-		router, h := newTestRouter(store)
+	// Creating an org is now a paid action: CreateOrg starts a Stripe Checkout
+	// session and returns its URL; the org is created later by the webhook.
+	t.Run("happy path returns checkout url", func(t *testing.T) {
+		store := &mockStore{}
+		fs := &fakeStripe{proPriceID: "price_pro", customerID: "cus_1", checkoutURL: "https://checkout.example/session"}
+		router, h := newOrgRouter(store, fs)
 		router.POST("/v1/organizations", h.CreateOrg)
 
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme"}`)
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme","plan":"PRO"}`)
 
-		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "https://checkout.example/session")
+		assert.Equal(t, "Acme", fs.lastCheckoutMeta["org_name"])
+		assert.Equal(t, "PRO", fs.lastCheckoutMeta["plan"])
+		assert.Equal(t, testUserID, fs.lastCheckoutMeta["user_id"])
+	})
+
+	t.Run("billing not configured returns 503", func(t *testing.T) {
+		store := &mockStore{}
+		router, h := newOrgRouter(store, nil) // nil stripe
+		router.POST("/v1/organizations", h.CreateOrg)
+
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme","plan":"PRO"}`)
+
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	})
 
 	t.Run("user already in an org returns 409", func(t *testing.T) {
 		store := &mockStore{orgsResult: []models.Organization{{ID: "org-1", Name: "Existing"}}}
-		router, h := newTestRouter(store)
+		router, h := newOrgRouter(store, &fakeStripe{proPriceID: "price_pro"})
 		router.POST("/v1/organizations", h.CreateOrg)
 
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Another"}`)
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Another","plan":"PRO"}`)
 
 		assert.Equal(t, http.StatusConflict, w.Code)
 	})
 
-	t.Run("duplicate name returns 409", func(t *testing.T) {
-		store := &mockStore{createOrgErr: models.ErrConflict}
-		router, h := newTestRouter(store)
+	t.Run("missing plan returns 400", func(t *testing.T) {
+		store := &mockStore{}
+		router, h := newOrgRouter(store, &fakeStripe{proPriceID: "price_pro"})
 		router.POST("/v1/organizations", h.CreateOrg)
 
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Taken"}`)
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme"}`)
 
-		assert.Equal(t, http.StatusConflict, w.Code)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
 	t.Run("name too short returns 400", func(t *testing.T) {
 		store := &mockStore{}
-		router, h := newTestRouter(store)
+		router, h := newOrgRouter(store, &fakeStripe{proPriceID: "price_pro"})
 		router.POST("/v1/organizations", h.CreateOrg)
 
-		w := doRequest(router, "POST", "/v1/organizations", `{"name":"A"}`)
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"A","plan":"PRO"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})

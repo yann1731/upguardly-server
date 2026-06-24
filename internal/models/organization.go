@@ -68,8 +68,15 @@ type Subscription struct {
 
 // --- Request types ---
 
+// CreateOrgRequest initiates the checkout-first org-creation flow. Creating an
+// organization requires a paid plan, so the request carries the chosen plan and
+// optional relative redirect paths; the org itself is created by the Stripe
+// checkout-completed webhook once payment succeeds.
 type CreateOrgRequest struct {
-	Name string `json:"name" binding:"required,min=2,max=100"`
+	Name        string `json:"name" binding:"required,min=2,max=100"`
+	Plan        string `json:"plan" binding:"required,oneof=PRO ENTERPRISE"`
+	SuccessPath string `json:"successPath"`
+	CancelPath  string `json:"cancelPath"`
 }
 
 type UpdateOrgRequest struct {

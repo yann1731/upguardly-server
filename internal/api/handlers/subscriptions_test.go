@@ -201,6 +201,87 @@ func TestStripeWebhook(t *testing.T) {
 	})
 }
 
+func TestHandleCheckoutCompleted(t *testing.T) {
+	t.Run("creates org and active subscription", func(t *testing.T) {
+		store := &mockStore{orgResult: &models.Organization{ID: "org-new", Name: "Acme"}}
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			entPriceID: "price_ent",
+			getSub: &stripe.Subscription{
+				Status:             stripe.SubscriptionStatusActive,
+				CurrentPeriodStart: 1700000000,
+				CurrentPeriodEnd:   1702592000,
+				Items: &stripe.SubscriptionItemList{
+					Data: []*stripe.SubscriptionItem{{Price: &stripe.Price{ID: "price_pro"}}},
+				},
+			},
+			event: stripe.Event{
+				Type: "checkout.session.completed",
+				Data: &stripe.EventData{Raw: json.RawMessage(checkoutSessionEventJSON("Acme", "PRO"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.Equal(t, "org-new", store.lastUpsertSub.OrgID)
+		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
+		assert.Equal(t, "ACTIVE", store.lastUpsertSub.Status)
+		// org_id is stamped onto the customer for future subscription.* events.
+		assert.Equal(t, "cus_1", fs.setOrgIDCustomer)
+		assert.Equal(t, "org-new", fs.setOrgIDOrg)
+	})
+
+	t.Run("idempotent when user already owns an org", func(t *testing.T) {
+		store := &mockStore{orgsResult: []models.Organization{{ID: "org-1", Name: "Existing"}}}
+		fs := &fakeStripe{
+			event: stripe.Event{
+				Type: "checkout.session.completed",
+				Data: &stripe.EventData{Raw: json.RawMessage(checkoutSessionEventJSON("Acme", "PRO"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Nil(t, store.lastUpsertSub)
+	})
+
+	t.Run("missing metadata is ignored", func(t *testing.T) {
+		store := &mockStore{}
+		fs := &fakeStripe{
+			event: stripe.Event{
+				Type: "checkout.session.completed",
+				Data: &stripe.EventData{Raw: json.RawMessage(`{"id":"cs_1","customer":{"id":"cus_1"}}`)},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Nil(t, store.lastUpsertSub)
+	})
+}
+
+// checkoutSessionEventJSON builds a checkout.session.completed payload carrying
+// the org-creation metadata, a customer, and a subscription reference.
+func checkoutSessionEventJSON(orgName, plan string) string {
+	return `{
+		"id": "cs_1",
+		"mode": "subscription",
+		"customer": {"id": "cus_1"},
+		"subscription": {"id": "sub_1"},
+		"metadata": {"user_id": "test-user-id", "org_name": "` + orgName + `", "plan": "` + plan + `"}
+	}`
+}
+
 // subscriptionEventJSON builds a Stripe subscription payload carrying the org_id
 // metadata and a single line item with the given price ID.
 func subscriptionEventJSON(priceID string) string {
