@@ -87,6 +87,9 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 		protected := v1.Group("")
 		protected.Use(middleware.AuthRequired())
 		{
+			// Current authenticated user (identity/email for the settings page).
+			protected.GET("/me", h.GetMe)
+
 			// Invitation accept — requires auth (to know which user is accepting).
 			protected.POST("/invitations/:token/accept", middleware.StrictRateLimit(), h.AcceptInvitation)
 
