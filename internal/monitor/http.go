@@ -55,8 +55,21 @@ func classifyHTTPError(err error) string {
 }
 
 func (c *HTTPChecker) Check(ctx context.Context, target string, timeout time.Duration) models.CheckResult {
+	safeDialer := SafeDialer()
+	safeDialer.Timeout = timeout
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = safeDialer.DialContext
+
 	client := &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
 	}
 
 	start := time.Now()

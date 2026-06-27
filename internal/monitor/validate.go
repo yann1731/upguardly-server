@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"syscall"
 
 	"upguardly-backend/internal/models"
 )
@@ -46,6 +47,25 @@ func isPrivateIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// SafeDialer returns a net.Dialer that prevents connections to private or reserved IPs.
+// The Control function evaluates the resolved IP just before the connection is made,
+// which prevents DNS rebinding vulnerabilities (TOCTOU).
+func SafeDialer() *net.Dialer {
+	return &net.Dialer{
+		Control: func(network, address string, c syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			ip := net.ParseIP(host)
+			if ip != nil && isPrivateIP(ip) {
+				return fmt.Errorf("SSRF prevention: connection to private IP %s is blocked", ip.String())
+			}
+			return nil
+		},
+	}
 }
 
 // ValidateTarget prevents SSRF by ensuring the monitor target is a publicly

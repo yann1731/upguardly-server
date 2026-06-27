@@ -2,7 +2,6 @@ package monitor
 
 import (
 	"context"
-	"net"
 	"time"
 
 	"upguardly-backend/internal/models"
@@ -13,9 +12,8 @@ type PortChecker struct{}
 func (c *PortChecker) Check(ctx context.Context, target string, timeout time.Duration) models.CheckResult {
 	start := time.Now()
 
-	dialer := &net.Dialer{
-		Timeout: timeout,
-	}
+	dialer := SafeDialer()
+	dialer.Timeout = timeout
 
 	conn, err := dialer.DialContext(ctx, "tcp", target)
 	latency := int(time.Since(start).Milliseconds())

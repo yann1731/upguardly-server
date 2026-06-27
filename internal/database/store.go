@@ -68,7 +68,14 @@ func (s *PrismaStore) CountMonitorsByUser(ctx context.Context, userId string) (i
 
 func (s *PrismaStore) ListMonitors(ctx context.Context, userId string) ([]models.Monitor, error) {
 	ms, err := s.client.Prisma.Monitor.FindMany(
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx)
 	if err != nil {
 		return nil, err
@@ -83,7 +90,14 @@ func (s *PrismaStore) ListMonitors(ctx context.Context, userId string) ([]models
 func (s *PrismaStore) GetMonitor(ctx context.Context, id, userId string) (*models.Monitor, error) {
 	m, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(id),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx)
 	if err != nil {
 		return nil, models.ErrNotFound
@@ -94,7 +108,14 @@ func (s *PrismaStore) GetMonitor(ctx context.Context, id, userId string) (*model
 func (s *PrismaStore) UpdateMonitor(ctx context.Context, id, userId string, req models.UpdateMonitorRequest) (*models.Monitor, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(id),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return nil, models.ErrNotFound
 	}
@@ -131,7 +152,14 @@ func (s *PrismaStore) UpdateMonitor(ctx context.Context, id, userId string, req 
 func (s *PrismaStore) DeleteMonitor(ctx context.Context, id, userId string) error {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(id),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return models.ErrNotFound
 	}
@@ -144,7 +172,14 @@ func (s *PrismaStore) DeleteMonitor(ctx context.Context, id, userId string) erro
 func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId string, limit int) ([]models.MonitorResult, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return nil, models.ErrNotFound
 	}
@@ -170,7 +205,14 @@ func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId s
 func (s *PrismaStore) ListIncidents(ctx context.Context, monitorId, userId string, limit int) ([]models.Incident, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return nil, models.ErrNotFound
 	}
@@ -194,7 +236,14 @@ func (s *PrismaStore) ListIncidents(ctx context.Context, monitorId, userId strin
 func (s *PrismaStore) GetMonitorStats(ctx context.Context, monitorId, userId string, since time.Time) (*models.MonitorStats, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return nil, models.ErrNotFound
 	}
@@ -395,7 +444,14 @@ func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.M
 func (s *PrismaStore) CreateAlert(ctx context.Context, monitorId, userId, channel, target string, enabled bool) (*models.Alert, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return nil, models.ErrNotFound
 	}
@@ -415,7 +471,14 @@ func (s *PrismaStore) CreateAlert(ctx context.Context, monitorId, userId, channe
 func (s *PrismaStore) ListAlerts(ctx context.Context, monitorId, userId string) ([]models.Alert, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.UserID.Equals(userId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
 	).Exec(ctx); err != nil {
 		return nil, models.ErrNotFound
 	}

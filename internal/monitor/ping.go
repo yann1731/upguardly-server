@@ -22,6 +22,34 @@ func (c *PingChecker) Check(ctx context.Context, target string, timeout time.Dur
 		host = h
 	}
 
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return models.CheckResult{
+			Status:  models.StatusDOWN,
+			Message: "DNS lookup failed",
+		}
+	}
+
+	var targetIP string
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			return models.CheckResult{
+				Status:  models.StatusDOWN,
+				Message: "SSRF prevention: connection to private IP is blocked",
+			}
+		}
+		if targetIP == "" {
+			targetIP = ip.IP.String()
+		}
+	}
+	if targetIP == "" {
+		return models.CheckResult{
+			Status:  models.StatusDOWN,
+			Message: "No IP addresses found",
+		}
+	}
+	host = targetIP
+
 	var cmd *exec.Cmd
 	timeoutSec := int(timeout.Seconds())
 	if timeoutSec < 1 {
