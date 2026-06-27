@@ -199,17 +199,44 @@ func (s *PrismaStore) GetMonitorStats(ctx context.Context, monitorId, userId str
 		return nil, models.ErrNotFound
 	}
 
-	rs, err := s.client.Prisma.MonitorResult.FindMany(
-		db.MonitorResult.MonitorID.Equals(monitorId),
-		db.MonitorResult.CheckedAt.Gte(since),
-	).OrderBy(
-		db.MonitorResult.CheckedAt.Order(db.ASC),
-	).Exec(ctx)
-	if err != nil {
-		return nil, err
-	}
+	until := time.Now()
 
-	stats := computeStats(rs, since, time.Now())
+	var stats *models.MonitorStats
+	if until.Sub(since) <= rawStatsWindow {
+		// Short window (≤24h view): read raw results for an exact series.
+		rs, err := s.client.Prisma.MonitorResult.FindMany(
+			db.MonitorResult.MonitorID.Equals(monitorId),
+			db.MonitorResult.CheckedAt.Gte(since),
+		).OrderBy(
+			db.MonitorResult.CheckedAt.Order(db.ASC),
+		).Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+		stats = computeStats(rs, since, until)
+	} else {
+		// Long window (7d/30d): read hourly rollups instead of every raw row.
+		rus, err := s.client.Prisma.MonitorResultRollup.FindMany(
+			db.MonitorResultRollup.MonitorID.Equals(monitorId),
+			db.MonitorResultRollup.Bucket.Gte(since.Truncate(time.Hour)),
+		).OrderBy(
+			db.MonitorResultRollup.Bucket.Order(db.ASC),
+		).Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]rollupRow, len(rus))
+		for i := range rus {
+			rows[i] = rollupRow{
+				Bucket:     rus[i].Bucket,
+				Checks:     rus[i].Checks,
+				SumLatency: rus[i].SumLatency,
+				MinLatency: rus[i].MinLatency,
+				MaxLatency: rus[i].MaxLatency,
+			}
+		}
+		stats = computeStatsFromRollups(rows, since, until)
+	}
 
 	incidents, err := s.client.Prisma.Incident.FindMany(
 		db.Incident.MonitorID.Equals(monitorId),
@@ -272,6 +299,84 @@ func computeStats(rs []db.MonitorResultModel, since, until time.Time) *models.Mo
 		}
 		buckets[idx].sum += rs[i].Latency
 		buckets[idx].count++
+	}
+	for i, b := range buckets {
+		if b.count == 0 {
+			continue
+		}
+		stats.Points = append(stats.Points, models.StatPoint{
+			Timestamp:  since.Add(time.Duration(i)*bucketDur + bucketDur/2),
+			AvgLatency: float64(b.sum) / float64(b.count),
+		})
+	}
+	return stats
+}
+
+// rawStatsWindow is the cutoff below which stats come from raw monitor_results
+// (exact). Longer windows read hourly rollups. 25h covers the 24h view with
+// margin; the 7d/30d periods fall to the rollup path.
+const rawStatsWindow = 25 * time.Hour
+
+// rollupRow is a plain projection of an hourly rollup, decoupled from the Prisma
+// model so the aggregation can be unit-tested without a database.
+type rollupRow struct {
+	Bucket     time.Time
+	Checks     int
+	SumLatency int
+	MinLatency int
+	MaxLatency int
+}
+
+// computeStatsFromRollups mirrors computeStats but works from hourly rollups.
+// Scalar aggregates (min/max/avg/total) are exact; the bucketed series assigns
+// each whole hour to one of statBuckets buckets, so the graph is a close
+// approximation at bucket boundaries — acceptable for 7d/30d trend views.
+func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.MonitorStats {
+	stats := &models.MonitorStats{Points: []models.StatPoint{}}
+	if len(rows) == 0 {
+		return stats
+	}
+
+	min, max, totalSum, totalCount := rows[0].MinLatency, rows[0].MaxLatency, 0, 0
+	for i := range rows {
+		if rows[i].MinLatency < min {
+			min = rows[i].MinLatency
+		}
+		if rows[i].MaxLatency > max {
+			max = rows[i].MaxLatency
+		}
+		totalSum += rows[i].SumLatency
+		totalCount += rows[i].Checks
+	}
+	if totalCount == 0 {
+		return stats
+	}
+	stats.MinLatency = min
+	stats.MaxLatency = max
+	stats.TotalChecks = totalCount
+	stats.AvgLatency = float64(totalSum) / float64(totalCount)
+
+	span := until.Sub(since)
+	if span <= 0 {
+		span = time.Second
+	}
+	bucketDur := span / statBuckets
+
+	type acc struct {
+		sum   int
+		count int
+	}
+	buckets := make([]acc, statBuckets)
+	for i := range rows {
+		idx := int(rows[i].Bucket.Sub(since) / bucketDur)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= statBuckets {
+			idx = statBuckets - 1
+		}
+		buckets[idx].sum += rows[i].SumLatency
+		buckets[idx].count += rows[i].Checks
 	}
 	for i, b := range buckets {
 		if b.count == 0 {

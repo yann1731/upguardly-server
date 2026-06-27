@@ -85,6 +85,7 @@ model Monitor {
   updatedAt DateTime      @updatedAt @map("updated_at")
 
   results   MonitorResult[]
+  rollups   MonitorResultRollup[]
   alerts    Alert[]
   incidents Incident[]
 
@@ -93,8 +94,30 @@ model Monitor {
   @@map("monitors")
 }
 
+// Hourly pre-aggregation of monitor_results (one row per monitor per hour),
+// used to answer 7d/30d stats without scanning raw rows. Populated by
+// maintenance.refresh_rollups() on a host timer — see migration
+// 20260627130000_add_result_rollups and docs/runbooks/partitioning.md.
+model MonitorResultRollup {
+  monitorId  String   @map("monitor_id")
+  monitor    Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  bucket     DateTime
+  checks     Int
+  sumLatency Int      @map("sum_latency")
+  minLatency Int      @map("min_latency")
+  maxLatency Int      @map("max_latency")
+
+  @@id([monitorId, bucket])
+  @@map("monitor_result_rollups")
+}
+
+// Partitioned by checked_at (Postgres RANGE). The partition key must be part of
+// the primary key, so the PK is composite (id, checked_at) — id alone is still
+// globally unique (cuid) and is never used as a lone lookup key. The actual
+// PARTITION BY / child-partition DDL is raw SQL (Prisma can't author it); see
+// migration 20260627120000_partition_timeseries_tables.
 model MonitorResult {
-  id         String   @id @default(cuid())
+  id         String   @default(cuid())
   monitorId  String   @map("monitor_id")
   monitor    Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
   status     Status
@@ -103,6 +126,7 @@ model MonitorResult {
   message    String?
   checkedAt  DateTime @default(now()) @map("checked_at")
 
+  @@id([id, checkedAt])
   @@index([monitorId, checkedAt])
   @@map("monitor_results")
 }
@@ -137,14 +161,17 @@ model Alert {
   @@map("alerts")
 }
 
+// Partitioned by sent_at (Postgres RANGE); composite PK (id, sent_at) for the
+// same reason as MonitorResult. Write-only audit log — never read by the app.
 model AlertHistory {
-  id      String   @id @default(cuid())
+  id      String   @default(cuid())
   alertId String   @map("alert_id")
   alert   Alert    @relation(fields: [alertId], references: [id], onDelete: Cascade)
   status  Status
   message String
   sentAt  DateTime @default(now()) @map("sent_at")
 
+  @@id([id, sentAt])
   @@index([alertId, sentAt])
   @@map("alert_history")
 }

@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # Run the checks (vet/test/migration safety) on every PR. Build + deploy stay
+  # gated to version tags via the per-job `if` below, so PRs never push images.
+  pull_request:
 
 env:
   REGISTRY: ghcr.io
@@ -13,16 +16,34 @@ jobs:
   ci:
     name: CI Checks
     runs-on: ubuntu-latest
+    # Ephemeral Postgres for the migration checks below.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: upguardly_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the destructive-DDL step can diff against the PR base.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Install CGO dependencies
-        run: sudo apt-get install -y gcc musl-dev
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y gcc musl-dev postgresql-client
 
       - name: Generate Prisma client
         run: go run github.com/steebchen/prisma-client-go generate
@@ -34,6 +55,55 @@ jobs:
 
       - name: go test
         run: go test -race ./...
+
+      # Gate 1: every committed migration must apply cleanly from an empty DB.
+      # Gate 2: schema.prisma and the committed migrations must not have drifted
+      # (nobody edited the schema without generating a migration). `migrate diff
+      # --exit-code` returns 2 when there is a diff, which fails the step.
+      - name: Migration check (apply + drift)
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/upguardly_ci"
+          SHADOW_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/upguardly_shadow"
+        run: |
+          set -euo pipefail
+          go run github.com/steebchen/prisma-client-go migrate deploy --schema ./prisma/schema.prisma
+          PGPASSWORD=postgres createdb -h localhost -U postgres upguardly_shadow
+          go run github.com/steebchen/prisma-client-go migrate diff \
+            --from-migrations ./prisma/migrations \
+            --to-schema-datamodel ./prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" \
+            --exit-code
+
+      # Advisory only (never fails the build): surface destructive DDL in new
+      # migrations so it gets a deliberate expand/contract review. See
+      # docs/runbooks/migrations.md.
+      - name: Flag destructive DDL
+        if: github.event_name == 'pull_request'
+        run: |
+          set -uo pipefail
+          base="origin/${{ github.base_ref }}"
+          files=$(git diff --name-only "$base"...HEAD -- 'prisma/migrations' | grep '\.sql$' || true)
+          if [ -z "$files" ]; then
+            echo "No new migration SQL in this PR."
+            exit 0
+          fi
+          matches=$(grep -inE 'DROP[[:space:]]+(TABLE|COLUMN)|ALTER[[:space:]]+COLUMN.*TYPE|DROP[[:space:]]+NOT[[:space:]]+NULL|TRUNCATE' $files || true)
+          if [ -n "$matches" ]; then
+            echo "$matches" | while IFS= read -r m; do
+              echo "::warning::Destructive DDL: $m"
+            done
+            echo "Destructive change detected — roll it out with expand/contract (see docs/runbooks/migrations.md)."
+          else
+            echo "No destructive DDL detected in new migrations."
+          fi
+
+  build:
+    name: Build & Push
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
@@ -62,7 +132,7 @@ jobs:
 
   deploy-staging:
     name: Deploy → Staging
-    needs: ci
+    needs: build
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -80,8 +150,10 @@ jobs:
             cd /opt/upguardly/staging
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
             sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
-            docker compose pull
-            docker compose up -d --remove-orphans
+            # --ignore-buildable skips the locally-built db image (pgBackRest);
+            # --build (re)builds it on the host before starting.
+            docker compose pull --ignore-buildable
+            docker compose up -d --build --remove-orphans
             timeout 60 bash -c 'until curl -sf http://localhost:8081/v1/health; do sleep 3; done'
 
   deploy-production:
@@ -104,6 +176,8 @@ jobs:
             cd /opt/upguardly/production
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
             sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
-            docker compose pull
-            docker compose up -d --remove-orphans
+            # --ignore-buildable skips the locally-built db image (pgBackRest);
+            # --build (re)builds it on the host before starting.
+            docker compose pull --ignore-buildable
+            docker compose up -d --build --remove-orphans
             timeout 60 bash -c 'until curl -sf http://localhost:8080/v1/health; do sleep 3; done'
