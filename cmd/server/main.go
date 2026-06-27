@@ -13,10 +13,12 @@ import (
 
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/api"
+	"upguardly-backend/internal/api/middleware"
 	"upguardly-backend/internal/auth"
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/database"
 	"upguardly-backend/internal/mailer"
+	"upguardly-backend/internal/redisclient"
 	"upguardly-backend/internal/scheduler"
 	"upguardly-backend/internal/stripeservice"
 )
@@ -43,17 +45,38 @@ func main() {
 
 	log.Println("Connected to database")
 
-	alertManager := alerter.NewManager(cfg)
+	// Optional Redis client shared by rate limiting (and, later, caching). When
+	// REDIS_URL is unset the rate limiter falls back to per-process in-memory
+	// counters — correct only for a single API replica.
+	if rdb, err := redisclient.New(cfg.Redis.URL); err != nil {
+		log.Printf("[WARN] redis unavailable (%v); rate limiting falls back to in-memory (single-instance only)", err)
+	} else if rdb != nil {
+		middleware.SetRedisClient(rdb)
+		defer rdb.Close()
+		log.Println("Connected to Redis — distributed rate limiting enabled")
+	} else {
+		log.Println("[WARN] REDIS_URL not set; rate limiting is in-memory (single-instance only)")
+	}
 
-	sched := scheduler.NewScheduler(db, alertManager)
+	alertManager := alerter.NewManager(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := sched.Start(ctx); err != nil {
-		log.Fatalf("Failed to start scheduler: %v", err)
+	// The embedded scheduler checks every monitor in-process. It is intended
+	// only for single-box deployments. When the API server is scaled to more
+	// than one replica, or a dedicated cmd/scheduler is running, this MUST be
+	// disabled (EMBEDDED_SCHEDULER=false) to avoid duplicate checks and alerts.
+	var sched *scheduler.Scheduler
+	if cfg.Scheduler.Embedded {
+		sched = scheduler.NewScheduler(db, alertManager)
+		if err := sched.Start(ctx); err != nil {
+			log.Fatalf("Failed to start scheduler: %v", err)
+		}
+		log.Println("Embedded scheduler started (single-box mode)")
+	} else {
+		log.Println("Embedded scheduler disabled — relying on dedicated scheduler instance(s)")
 	}
-	log.Println("Scheduler started")
 
 	store := database.NewPrismaStore(db)
 	s := stripeservice.NewClient(cfg.Stripe)
@@ -78,7 +101,9 @@ func main() {
 	log.Println("Shutting down server...")
 
 	cancel()
-	sched.Stop()
+	if sched != nil {
+		sched.Stop()
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

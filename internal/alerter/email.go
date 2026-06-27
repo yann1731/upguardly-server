@@ -13,7 +13,6 @@ import (
 
 type EmailAlerter struct {
 	config config.SendGridConfig
-	To     string
 }
 
 func NewEmailAlerter(cfg config.SendGridConfig) *EmailAlerter {
@@ -22,12 +21,12 @@ func NewEmailAlerter(cfg config.SendGridConfig) *EmailAlerter {
 	}
 }
 
-func (a *EmailAlerter) Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error {
+func (a *EmailAlerter) Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error {
 	if a.config.APIKey == "" {
 		return fmt.Errorf("SendGrid not configured")
 	}
 
-	if a.To == "" {
+	if target == "" {
 		return fmt.Errorf("recipient email not set")
 	}
 
@@ -46,7 +45,7 @@ Sent by Upguardly Monitoring
 `, monitor.Name, result.Status, monitor.Type, monitor.Target, result.Latency, result.Message)
 
 	from := mail.NewEmail(a.config.FromName, a.config.From)
-	to := mail.NewEmail("", a.To)
+	to := mail.NewEmail("", target)
 	message := mail.NewSingleEmail(from, subject, to, body, "")
 
 	client := sendgrid.NewSendClient(a.config.APIKey)

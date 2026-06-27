@@ -10,9 +10,7 @@ import (
 	"upguardly-backend/internal/models"
 )
 
-type SlackAlerter struct {
-	WebhookURL string
-}
+type SlackAlerter struct{}
 
 func NewSlackAlerter() *SlackAlerter {
 	return &SlackAlerter{}
@@ -33,8 +31,8 @@ type slackText struct {
 	Text string `json:"text"`
 }
 
-func (a *SlackAlerter) Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error {
-	if a.WebhookURL == "" {
+func (a *SlackAlerter) Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error {
+	if target == "" {
 		return fmt.Errorf("slack webhook URL not configured")
 	}
 
@@ -73,7 +71,7 @@ func (a *SlackAlerter) Send(ctx context.Context, monitor *models.Monitor, result
 		return fmt.Errorf("failed to marshal slack payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.WebhookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}

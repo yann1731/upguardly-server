@@ -15,7 +15,6 @@ import (
 
 type SMSAlerter struct {
 	config config.TwilioConfig
-	To     string
 }
 
 func NewSMSAlerter(cfg config.TwilioConfig) *SMSAlerter {
@@ -24,12 +23,12 @@ func NewSMSAlerter(cfg config.TwilioConfig) *SMSAlerter {
 	}
 }
 
-func (a *SMSAlerter) Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error {
+func (a *SMSAlerter) Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error {
 	if a.config.AccountSID == "" || a.config.APIKeySID == "" || a.config.APIKeySecret == "" {
 		return fmt.Errorf("Twilio not configured")
 	}
 
-	if a.To == "" {
+	if target == "" {
 		return fmt.Errorf("recipient phone number not set")
 	}
 
@@ -49,7 +48,7 @@ func (a *SMSAlerter) Send(ctx context.Context, monitor *models.Monitor, result *
 	twilioURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", a.config.AccountSID)
 
 	data := url.Values{}
-	data.Set("To", a.To)
+	data.Set("To", target)
 	data.Set("From", a.config.FromNumber)
 	data.Set("Body", message)
 

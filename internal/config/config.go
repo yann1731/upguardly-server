@@ -16,9 +16,23 @@ type Config struct {
 	Etcd        EtcdConfig
 	Scheduler   SchedulerConfig
 	Stripe      StripeConfig
+	Redis       RedisConfig
+}
+
+type RedisConfig struct {
+	// URL is a standard redis connection string (redis://[:password@]host:port/db).
+	// When empty, Redis-backed features (e.g. distributed rate limiting) fall
+	// back to a safe local default and the limiter fails open.
+	URL string
 }
 
 type SchedulerConfig struct {
+	// Embedded controls whether the API server (cmd/server) runs an in-process
+	// scheduler that checks all monitors. It must be false whenever a dedicated
+	// scheduler binary (cmd/scheduler) is running or the API server is scaled to
+	// more than one replica, otherwise monitors are checked — and alerts fired —
+	// multiple times. Default false; enable only for single-box deployments.
+	Embedded       bool
 	InstanceID     string
 	PartitionCount int
 	SQLitePath     string
@@ -94,7 +108,11 @@ func Load() *Config {
 			ProPriceID:        getEnv("STRIPE_PRO_PRICE_ID", ""),
 			EnterprisePriceID: getEnv("STRIPE_ENTERPRISE_PRICE_ID", ""),
 		},
+		Redis: RedisConfig{
+			URL: getEnv("REDIS_URL", ""),
+		},
 		Scheduler: SchedulerConfig{
+			Embedded:       getEnvBool("EMBEDDED_SCHEDULER", false),
 			InstanceID:     getEnv("SCHEDULER_INSTANCE_ID", "scheduler-0"),
 			PartitionCount: getEnvInt("SCHEDULER_PARTITION_COUNT", 1),
 			SQLitePath:     getEnv("SCHEDULER_SQLITE_PATH", "/tmp/upguardly-scheduler.db"),
@@ -156,6 +174,15 @@ func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intVal, err := strconv.Atoi(value); err == nil {
 			return intVal
+		}
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if boolVal, err := strconv.ParseBool(value); err == nil {
+			return boolVal
 		}
 	}
 	return defaultValue

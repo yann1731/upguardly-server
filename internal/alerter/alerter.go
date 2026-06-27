@@ -8,7 +8,10 @@ import (
 )
 
 type Alerter interface {
-	Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error
+	// Send delivers an alert to target. target is passed per call (recipient
+	// email, phone number, or webhook URL) rather than stored on the alerter,
+	// so a single shared alerter instance is safe for concurrent use.
+	Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error
 }
 
 type Manager struct {
@@ -36,16 +39,5 @@ func (m *Manager) Send(ctx context.Context, channel models.AlertChannel, target 
 		return nil
 	}
 
-	switch a := alerter.(type) {
-	case *EmailAlerter:
-		a.To = target
-	case *SMSAlerter:
-		a.To = target
-	case *DiscordAlerter:
-		a.WebhookURL = target
-	case *SlackAlerter:
-		a.WebhookURL = target
-	}
-
-	return alerter.Send(ctx, monitor, result)
+	return alerter.Send(ctx, target, monitor, result)
 }

@@ -358,7 +358,11 @@ All config is loaded from environment variables in `internal/config/config.go`
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PORT` | `8080` | API listen port |
-| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/upguardly?sslmode=disable` | PostgreSQL DSN |
+| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/upguardly?sslmode=disable` | PostgreSQL DSN (point at PgBouncer with `?pgbouncer=true` when pooling) |
+| `DIRECT_DATABASE_URL` | — (falls back to `DATABASE_URL`) | Direct (non‑pooled) Postgres DSN used for migrations only; set when `DATABASE_URL` goes through PgBouncer |
+| `EMBEDDED_SCHEDULER` | `false` | Run the in‑process scheduler inside `server` (single‑box only — keep `false` when a dedicated `scheduler` runs or `server` has >1 replica) |
+| `REDIS_URL` | — | Shared Redis for distributed rate limiting (in‑memory fallback when unset; limiter fails open on Redis errors) |
+| `TRUSTED_PROXIES` | private ranges (`10/8`, `172.16/12`, `192.168/16`, `127.0.0.1/32`) | Comma‑separated proxy CIDRs gin trusts for client‑IP resolution (rate limiting) |
 | `SUPERTOKENS_CONNECTION_URI` | `http://localhost:3567` | SuperTokens core URL |
 | `SUPERTOKENS_API_KEY` | — | SuperTokens core API key |
 | `API_DOMAIN` | `http://localhost:8080` | Public API origin (for SuperTokens) |

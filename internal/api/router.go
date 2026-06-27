@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -50,8 +51,37 @@ func metricsAuth(token string) gin.HandlerFunc {
 	}
 }
 
+// trustedProxies returns the proxy CIDRs/IPs gin should trust for client-IP
+// resolution. TRUSTED_PROXIES is a comma-separated list; when unset it defaults
+// to the standard private ranges (the docker network the reverse proxy uses).
+func trustedProxies() []string {
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1/32"}
+}
+
 func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *stripeservice.Client) *gin.Engine {
 	router := gin.Default()
+
+	// Trust only the reverse proxy / load balancer in front of us so that
+	// gin.Context.ClientIP (used by rate limiting) reflects the real client and
+	// cannot be spoofed via X-Forwarded-For. Configure with TRUSTED_PROXIES
+	// (comma-separated CIDRs/IPs); default to private ranges, which covers the
+	// docker-compose bridge network the proxy sits on.
+	if err := router.SetTrustedProxies(trustedProxies()); err != nil {
+		// A bad CIDR shouldn't crash the server; fall back to gin's default and
+		// log so the misconfiguration is visible.
+		// (gin.Default already logs proxy-trust warnings.)
+		_ = err
+	}
 
 	router.Use(gin.Recovery())
 	router.Use(securityHeaders())

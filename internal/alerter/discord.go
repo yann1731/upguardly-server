@@ -10,9 +10,7 @@ import (
 	"upguardly-backend/internal/models"
 )
 
-type DiscordAlerter struct {
-	WebhookURL string
-}
+type DiscordAlerter struct{}
 
 func NewDiscordAlerter() *DiscordAlerter {
 	return &DiscordAlerter{}
@@ -36,8 +34,8 @@ type embedField struct {
 	Inline bool   `json:"inline"`
 }
 
-func (a *DiscordAlerter) Send(ctx context.Context, monitor *models.Monitor, result *models.CheckResult) error {
-	if a.WebhookURL == "" {
+func (a *DiscordAlerter) Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error {
+	if target == "" {
 		return fmt.Errorf("discord webhook URL not configured")
 	}
 
@@ -65,7 +63,7 @@ func (a *DiscordAlerter) Send(ctx context.Context, monitor *models.Monitor, resu
 		return fmt.Errorf("failed to marshal discord payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.WebhookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
