@@ -14,9 +14,9 @@ const Unlimited = -1
 func LimitsForPlan(plan string) PlanLimits {
 	switch plan {
 	case "PRO":
-		return PlanLimits{MaxMonitors: 50, MaxAlertsPerMonitor: 10}
+		return PlanLimits{MaxMonitors: 10, MaxAlertsPerMonitor: 10}
 	case "ENTERPRISE":
-		return PlanLimits{MaxMonitors: Unlimited, MaxAlertsPerMonitor: Unlimited}
+		return PlanLimits{MaxMonitors: 100, MaxAlertsPerMonitor: Unlimited}
 	default: // FREE and anything unrecognised
 		return PlanLimits{MaxMonitors: 5, MaxAlertsPerMonitor: 1}
 	}
