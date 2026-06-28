@@ -14,5 +14,13 @@ type StripeService interface {
 	CreatePortalSession(customerID, returnURL string) (string, error)
 	ParseWebhook(payload []byte, sig string) (stripe.Event, error)
 	CancelSubscription(subID string) error
+	// SetCancelAtPeriodEnd schedules cancellation at the end of the current
+	// billing period (the user keeps access until then).
+	SetCancelAtPeriodEnd(subID string, cancel bool) error
 	GetCustomer(customerID string) (*stripe.Customer, error)
+	// FindCustomerByUser returns the Stripe customer ID for a user, or "" if
+	// none exists. It never creates a customer.
+	FindCustomerByUser(userID string) (string, error)
+	// GetActiveSubscription returns the customer's current subscription, or nil.
+	GetActiveSubscription(customerID string) (*stripe.Subscription, error)
 }

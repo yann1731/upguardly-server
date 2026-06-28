@@ -38,16 +38,10 @@ func (c *Client) PriceIDForPlan(plan string) (string, error) {
 // billing subject), keyed on user_id metadata. The metadata is what the
 // subscription webhooks resolve the subscription back to.
 func (c *Client) EnsureCustomer(userID, name string) (string, error) {
-	// Search for an existing customer by user_id metadata.
-	iter := customer.List(&stripe.CustomerListParams{})
-	for iter.Next() {
-		cust := iter.Customer()
-		if cust.Metadata["user_id"] == userID {
-			return cust.ID, nil
-		}
-	}
-	if err := iter.Err(); err != nil {
-		return "", fmt.Errorf("failed to search customers: %w", err)
+	if id, err := c.FindCustomerByUser(userID); err != nil {
+		return "", err
+	} else if id != "" {
+		return id, nil
 	}
 
 	params := &stripe.CustomerParams{}
@@ -61,6 +55,22 @@ func (c *Client) EnsureCustomer(userID, name string) (string, error) {
 		return "", fmt.Errorf("failed to create Stripe customer: %w", err)
 	}
 	return cust.ID, nil
+}
+
+// FindCustomerByUser returns the Stripe customer ID whose user_id metadata
+// matches userID, or "" if none exists. It never creates a customer.
+func (c *Client) FindCustomerByUser(userID string) (string, error) {
+	iter := customer.List(&stripe.CustomerListParams{})
+	for iter.Next() {
+		cust := iter.Customer()
+		if cust.Metadata["user_id"] == userID {
+			return cust.ID, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return "", fmt.Errorf("failed to search customers: %w", err)
+	}
+	return "", nil
 }
 
 // CreateCheckoutSession creates a Stripe Checkout session and returns the URL.
@@ -100,19 +110,71 @@ func (c *Client) CreatePortalSession(customerID, returnURL string) (string, erro
 }
 
 // ParseWebhook verifies and parses a Stripe webhook payload.
+//
+// IgnoreAPIVersionMismatch is set because the Stripe account emits events on a
+// newer API version than this pinned stripe-go release. Without it, every event
+// is rejected by the version check (and surfaced as a misleading signature
+// error). The signature itself is still verified. The fields we read
+// (plan/status/customer/price) are stable across versions; period dates that
+// moved to line items are reconciled separately via the REST API.
 func (c *Client) ParseWebhook(payload []byte, sig string) (stripe.Event, error) {
-	event, err := webhook.ConstructEvent(payload, sig, c.cfg.WebhookSecret)
+	event, err := webhook.ConstructEventWithOptions(payload, sig, c.cfg.WebhookSecret, webhook.ConstructEventOptions{
+		IgnoreAPIVersionMismatch: true,
+	})
 	if err != nil {
 		return stripe.Event{}, fmt.Errorf("webhook signature verification failed: %w", err)
 	}
 	return event, nil
 }
 
-// CancelSubscription cancels the Stripe subscription.
+// CancelSubscription cancels the Stripe subscription immediately.
 func (c *Client) CancelSubscription(subID string) error {
 	params := &stripe.SubscriptionCancelParams{}
 	_, err := subscription.Cancel(subID, params)
 	return err
+}
+
+// SetCancelAtPeriodEnd schedules (or unschedules) cancellation of a Stripe
+// subscription at the end of the current billing period. The subscription stays
+// active until then; Stripe emits customer.subscription.deleted when it lapses.
+func (c *Client) SetCancelAtPeriodEnd(subID string, cancel bool) error {
+	_, err := subscription.Update(subID, &stripe.SubscriptionParams{
+		CancelAtPeriodEnd: stripe.Bool(cancel),
+	})
+	return err
+}
+
+// GetActiveSubscription returns the customer's current subscription, preferring
+// an active/trialing/past_due one over a canceled one. Returns (nil, nil) when
+// the customer has no subscriptions.
+//
+// Unlike webhook payloads (which arrive in the account's newer API version),
+// REST responses are pinned to this stripe-go release's API version, so period
+// fields deserialize correctly — making this the source of truth for display.
+func (c *Client) GetActiveSubscription(customerID string) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionListParams{
+		Customer: stripe.String(customerID),
+		Status:   stripe.String("all"),
+	}
+	params.Limit = stripe.Int64(20)
+
+	iter := subscription.List(params)
+	var fallback *stripe.Subscription
+	for iter.Next() {
+		s := iter.Subscription()
+		switch s.Status {
+		case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusPastDue:
+			return s, nil
+		default:
+			if fallback == nil {
+				fallback = s
+			}
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list subscriptions: %w", err)
+	}
+	return fallback, nil
 }
 
 // GetCustomer retrieves a customer by ID from Stripe.

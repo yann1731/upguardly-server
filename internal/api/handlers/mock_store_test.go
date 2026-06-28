@@ -215,6 +215,12 @@ type fakeStripe struct {
 	ensureErr   error
 	checkoutErr error
 	portalErr   error
+
+	activeSub  *stripe.Subscription // returned by GetActiveSubscription
+	findCustID string               // returned by FindCustomerByUser ("" = none)
+	cancelErr  error                // returned by SetCancelAtPeriodEnd
+
+	lastCancelAtPeriodEnd *bool // records the last SetCancelAtPeriodEnd value
 }
 
 func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
@@ -242,8 +248,18 @@ func (f *fakeStripe) ParseWebhook(_ []byte, _ string) (stripe.Event, error) {
 func (f *fakeStripe) CancelSubscription(_ string) error {
 	return f.portalErr
 }
+func (f *fakeStripe) SetCancelAtPeriodEnd(_ string, cancel bool) error {
+	f.lastCancelAtPeriodEnd = &cancel
+	return f.cancelErr
+}
 func (f *fakeStripe) GetCustomer(customerID string) (*stripe.Customer, error) {
 	return &stripe.Customer{ID: customerID, Metadata: map[string]string{"user_id": testUserID}}, nil
+}
+func (f *fakeStripe) FindCustomerByUser(_ string) (string, error) {
+	return f.findCustID, nil
+}
+func (f *fakeStripe) GetActiveSubscription(_ string) (*stripe.Subscription, error) {
+	return f.activeSub, nil
 }
 
 func doRequest(router *gin.Engine, method, path string, body string) *httptest.ResponseRecorder {

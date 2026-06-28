@@ -62,8 +62,11 @@ type Subscription struct {
 	StripePriceID        *string    `json:"stripePriceId,omitempty"`
 	CurrentPeriodStart   *time.Time `json:"currentPeriodStart,omitempty"`
 	CurrentPeriodEnd     *time.Time `json:"currentPeriodEnd,omitempty"`
-	CreatedAt            time.Time  `json:"createdAt"`
-	UpdatedAt            time.Time  `json:"updatedAt"`
+	// CancelAtPeriodEnd reflects Stripe's flag; it is derived from the live
+	// Stripe subscription during reconciliation and not persisted in the DB.
+	CancelAtPeriodEnd bool      `json:"cancelAtPeriodEnd"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // --- Request types ---

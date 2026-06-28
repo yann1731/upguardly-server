@@ -27,12 +27,119 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 
 	sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
 	if err != nil {
-		// Return a default free subscription if none exists
+		// No DB record. A webhook may have been missed, so try to reconcile
+		// directly from Stripe before falling back to a default free plan.
+		if reconciled := h.reconcileSubscription(c, userId, nil); reconciled != nil {
+			c.JSON(http.StatusOK, reconciled)
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"plan": "FREE", "status": "ACTIVE"})
 		return
 	}
 
+	// Reconcile the stored record against Stripe's live state so the displayed
+	// plan, status and cancellation flag are always accurate even if a webhook
+	// was dropped or arrived in an unparseable API version.
+	if reconciled := h.reconcileSubscription(c, userId, sub); reconciled != nil {
+		c.JSON(http.StatusOK, reconciled)
+		return
+	}
+
 	c.JSON(http.StatusOK, sub)
+}
+
+// reconcileSubscription refreshes the user's subscription from Stripe's live
+// state and returns the up-to-date model, or nil when reconciliation is not
+// possible (caller should fall back to the DB record or a default free plan).
+func (h *Handlers) reconcileSubscription(c *gin.Context, userID string, dbSub *models.Subscription) *models.Subscription {
+	if h.stripe == nil {
+		return nil
+	}
+
+	// Resolve the Stripe customer: prefer the stored ID, otherwise look one up
+	// by user_id metadata (without creating one) to heal records lost to failed
+	// webhooks.
+	customerID := ""
+	if dbSub != nil && dbSub.StripeCustomerID != nil {
+		customerID = *dbSub.StripeCustomerID
+	} else {
+		id, err := h.stripe.FindCustomerByUser(userID)
+		if err != nil || id == "" {
+			return nil
+		}
+		customerID = id
+	}
+
+	stripeSub, err := h.stripe.GetActiveSubscription(customerID)
+	if err != nil {
+		return nil // transient Stripe error — fall back to the DB record
+	}
+
+	if stripeSub == nil {
+		// No subscription at Stripe: downgrade a stale paid record to FREE.
+		if dbSub != nil && dbSub.Plan != "FREE" {
+			updated, upErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+				UserID: userID,
+				Plan:   "FREE",
+				Status: "CANCELED",
+			})
+			if upErr != nil {
+				return nil
+			}
+			return updated
+		}
+		return nil
+	}
+
+	params, err := h.upsertParamsFromStripe(userID, stripeSub)
+	if err != nil {
+		return nil // unrecognised price — leave the DB record untouched
+	}
+	updated, err := h.store.UpsertSubscription(c.Request.Context(), params)
+	if err != nil {
+		return nil
+	}
+	updated.CancelAtPeriodEnd = stripeSub.CancelAtPeriodEnd
+	return updated
+}
+
+// upsertParamsFromStripe maps a Stripe subscription to upsert params. Period
+// fields are only set when present (webhook payloads on newer API versions omit
+// them at the top level), so we never overwrite good dates with the epoch.
+func (h *Handlers) upsertParamsFromStripe(userID string, s *stripe.Subscription) (models.UpsertSubscriptionParams, error) {
+	var priceID string
+	if len(s.Items.Data) > 0 && s.Items.Data[0].Price != nil {
+		priceID = s.Items.Data[0].Price.ID
+	}
+
+	plan, err := h.planFromPriceID(priceID)
+	if err != nil {
+		return models.UpsertSubscriptionParams{}, err
+	}
+
+	subID := s.ID
+	params := models.UpsertSubscriptionParams{
+		UserID:               userID,
+		Plan:                 plan,
+		Status:               mapStripeStatus(string(s.Status)),
+		StripeSubscriptionID: &subID,
+	}
+	if s.Customer != nil && s.Customer.ID != "" {
+		customerID := s.Customer.ID
+		params.StripeCustomerID = &customerID
+	}
+	if priceID != "" {
+		params.StripePriceID = &priceID
+	}
+	if s.CurrentPeriodStart > 0 {
+		start := time.Unix(s.CurrentPeriodStart, 0)
+		params.CurrentPeriodStart = &start
+	}
+	if s.CurrentPeriodEnd > 0 {
+		end := time.Unix(s.CurrentPeriodEnd, 0)
+		params.CurrentPeriodEnd = &end
+	}
+	return params, nil
 }
 
 func (h *Handlers) CreateCheckout(c *gin.Context) {
@@ -198,6 +305,9 @@ func (h *Handlers) StripeWebhook(c *gin.Context) {
 
 	event, err := h.stripe.ParseWebhook(payload, c.GetHeader("Stripe-Signature"))
 	if err != nil {
+		// Log the underlying error: a generic 400 hides whether the cause is a
+		// bad signing secret, an expired timestamp, or an API-version mismatch.
+		log.Printf("stripe webhook: rejected event: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid webhook signature"})
 		return
 	}
@@ -228,35 +338,14 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	status := mapStripeStatus(string(sub.Status))
-	start := time.Unix(sub.CurrentPeriodStart, 0)
-	end := time.Unix(sub.CurrentPeriodEnd, 0)
-	customerID := sub.Customer.ID
-	subID := sub.ID
-
-	var priceID string
-	if len(sub.Items.Data) > 0 {
-		priceID = sub.Items.Data[0].Price.ID
-	}
-
-	plan, err := h.planFromPriceID(priceID)
+	params, err := h.upsertParamsFromStripe(userID, &sub)
 	if err != nil {
-		log.Printf("stripe webhook: unrecognised price ID %q for user %s — ignoring event", priceID, userID)
+		log.Printf("stripe webhook: unrecognised price for user %s — ignoring event: %v", userID, err)
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
 
-	_, upsertErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
-		UserID:               userID,
-		Plan:                 plan,
-		Status:               status,
-		StripeCustomerID:     &customerID,
-		StripeSubscriptionID: &subID,
-		StripePriceID:        &priceID,
-		CurrentPeriodStart:   &start,
-		CurrentPeriodEnd:     &end,
-	})
-	if upsertErr != nil {
+	if _, upsertErr := h.store.UpsertSubscription(c.Request.Context(), params); upsertErr != nil {
 		log.Printf("stripe webhook: failed to upsert subscription for user %s: %v", userID, upsertErr)
 	}
 
@@ -342,20 +431,17 @@ func (h *Handlers) CancelSubscription(c *gin.Context) {
 		return
 	}
 
-	err = h.stripe.CancelSubscription(*sub.StripeSubscriptionID)
-	if err != nil {
+	// Schedule cancellation at the end of the current period so the user keeps
+	// access until it lapses. Re-scheduling an already-scheduled cancel is a
+	// no-op, so this is idempotent. The customer.subscription.deleted webhook
+	// downgrades the record to FREE when the period actually ends.
+	if err := h.stripe.SetCancelAtPeriodEnd(*sub.StripeSubscriptionID, true); err != nil {
+		log.Printf("cancel subscription for user %s: %v", userId, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel subscription"})
 		return
 	}
 
-	// Update the database to reflect the cancellation (Stripe webhook will also do this, but this makes it immediate)
-	_, _ = h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
-		UserID: userId,
-		Plan:   "FREE",
-		Status: "CANCELED",
-	})
-
-	c.JSON(http.StatusOK, gin.H{"status": "CANCELED"})
+	c.JSON(http.StatusOK, gin.H{"status": sub.Status, "cancelAtPeriodEnd": true})
 }
 
 func mapStripeStatus(s string) string {

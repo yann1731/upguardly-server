@@ -37,6 +37,76 @@ func TestGetSubscription(t *testing.T) {
 		assert.Contains(t, w.Body.String(), `"plan":"FREE"`)
 	})
 
+	t.Run("reconciles a stale record against live Stripe state", func(t *testing.T) {
+		// DB shows FREE, but Stripe reports an active PRO subscription.
+		sub := aSubscription("FREE")
+		cust := "cus_1"
+		sub.StripeCustomerID = &cust
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{proPriceID: "price_pro", activeSub: aStripeSub("price_pro", true)}
+		router, h := newOrgRouter(store, fs)
+		router.GET("/v1/organizations/:id/subscription", h.GetSubscription)
+
+		w := doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
+	})
+}
+
+func TestCancelSubscription(t *testing.T) {
+	t.Run("billing not configured returns 503", func(t *testing.T) {
+		store := &mockStore{}
+		router, h := newOrgRouter(store, nil)
+		router.DELETE("/v1/organizations/:id/subscription", h.CancelSubscription)
+
+		w := doRequest(router, "DELETE", "/v1/organizations/test-org-id/subscription", "")
+
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	})
+
+	t.Run("no billing subscription returns 404", func(t *testing.T) {
+		store := &mockStore{subResult: aSubscription("PRO")} // no StripeSubscriptionID
+		router, h := newOrgRouter(store, &fakeStripe{})
+		router.DELETE("/v1/organizations/:id/subscription", h.CancelSubscription)
+
+		w := doRequest(router, "DELETE", "/v1/organizations/test-org-id/subscription", "")
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("schedules cancellation at period end", func(t *testing.T) {
+		sub := aSubscription("PRO")
+		subID := "sub_1"
+		sub.StripeSubscriptionID = &subID
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{}
+		router, h := newOrgRouter(store, fs)
+		router.DELETE("/v1/organizations/:id/subscription", h.CancelSubscription)
+
+		w := doRequest(router, "DELETE", "/v1/organizations/test-org-id/subscription", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, fs.lastCancelAtPeriodEnd)
+		assert.True(t, *fs.lastCancelAtPeriodEnd)
+		assert.Contains(t, w.Body.String(), `"cancelAtPeriodEnd":true`)
+	})
+}
+
+// aStripeSub builds a live Stripe subscription with a single line item at the
+// given price ID.
+func aStripeSub(priceID string, cancelAtPeriodEnd bool) *stripe.Subscription {
+	return &stripe.Subscription{
+		ID:                "sub_1",
+		Status:            stripe.SubscriptionStatusActive,
+		CancelAtPeriodEnd: cancelAtPeriodEnd,
+		Customer:          &stripe.Customer{ID: "cus_1"},
+		CurrentPeriodEnd:  1702592000,
+		Items: &stripe.SubscriptionItemList{
+			Data: []*stripe.SubscriptionItem{{Price: &stripe.Price{ID: priceID}}},
+		},
+	}
 }
 
 func TestCreateCheckout(t *testing.T) {
