@@ -7,6 +7,7 @@ import (
 	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
 	checkoutsession "github.com/stripe/stripe-go/v76/checkout/session"
 	"github.com/stripe/stripe-go/v76/customer"
+	"github.com/stripe/stripe-go/v76/subscription"
 	"github.com/stripe/stripe-go/v76/webhook"
 
 	"upguardly-backend/internal/config"
@@ -105,4 +106,11 @@ func (c *Client) ParseWebhook(payload []byte, sig string) (stripe.Event, error) 
 		return stripe.Event{}, fmt.Errorf("webhook signature verification failed: %w", err)
 	}
 	return event, nil
+}
+
+// CancelSubscription cancels the Stripe subscription.
+func (c *Client) CancelSubscription(subID string) error {
+	params := &stripe.SubscriptionCancelParams{}
+	_, err := subscription.Cancel(subID, params)
+	return err
 }

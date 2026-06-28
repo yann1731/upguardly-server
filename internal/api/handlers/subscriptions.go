@@ -324,6 +324,40 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 	c.JSON(http.StatusOK, gin.H{"received": true})
 }
 
+func (h *Handlers) CancelSubscription(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if h.stripe == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Billing not configured"})
+		return
+	}
+
+	sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
+	if err != nil || sub.StripeSubscriptionID == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No active billing subscription"})
+		return
+	}
+
+	err = h.stripe.CancelSubscription(*sub.StripeSubscriptionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel subscription"})
+		return
+	}
+
+	// Update the database to reflect the cancellation (Stripe webhook will also do this, but this makes it immediate)
+	_, _ = h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+		UserID: userId,
+		Plan:   "FREE",
+		Status: "CANCELED",
+	})
+
+	c.JSON(http.StatusOK, gin.H{"status": "CANCELED"})
+}
+
 func mapStripeStatus(s string) string {
 	switch s {
 	case "active":

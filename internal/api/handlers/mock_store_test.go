@@ -239,6 +239,9 @@ func (f *fakeStripe) CreatePortalSession(_, _ string) (string, error) {
 func (f *fakeStripe) ParseWebhook(_ []byte, _ string) (stripe.Event, error) {
 	return f.event, f.parseErr
 }
+func (f *fakeStripe) CancelSubscription(_ string) error {
+	return f.portalErr
+}
 
 func doRequest(router *gin.Engine, method, path string, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()

@@ -13,4 +13,5 @@ type StripeService interface {
 	CreateCheckoutSession(customerID, priceID, successURL, cancelURL string) (string, error)
 	CreatePortalSession(customerID, returnURL string) (string, error)
 	ParseWebhook(payload []byte, sig string) (stripe.Event, error)
+	CancelSubscription(subID string) error
 }
