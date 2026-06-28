@@ -17,6 +17,7 @@ type Config struct {
 	Scheduler   SchedulerConfig
 	Stripe      StripeConfig
 	Redis       RedisConfig
+	RateLimit   RateLimitConfig
 }
 
 type RedisConfig struct {
@@ -24,6 +25,20 @@ type RedisConfig struct {
 	// When empty, Redis-backed features (e.g. distributed rate limiting) fall
 	// back to a safe local default and the limiter fails open.
 	URL string
+}
+
+type RateLimitConfig struct {
+	// DefaultPerMin is the global per-IP request budget per window applied to
+	// every route. StrictPerMin is the tighter budget for mutation endpoints.
+	// Both are tunable so operators can retune without a rebuild.
+	DefaultPerMin int
+	StrictPerMin  int
+	// Window is the fixed window over which the budgets are counted.
+	Window time.Duration
+	// RequireRedis makes a missing/unreachable Redis fatal at startup instead of
+	// silently falling back to per-process in-memory counters. Must be true for
+	// any multi-replica deployment, otherwise the global limit is not enforced.
+	RequireRedis bool
 }
 
 type SchedulerConfig struct {
@@ -110,6 +125,12 @@ func Load() *Config {
 		},
 		Redis: RedisConfig{
 			URL: getEnv("REDIS_URL", ""),
+		},
+		RateLimit: RateLimitConfig{
+			DefaultPerMin: getEnvInt("RATE_LIMIT_DEFAULT_PER_MIN", 600),
+			StrictPerMin:  getEnvInt("RATE_LIMIT_STRICT_PER_MIN", 60),
+			Window:        time.Duration(getEnvInt("RATE_LIMIT_WINDOW_SECONDS", 60)) * time.Second,
+			RequireRedis:  getEnvBool("RATE_LIMIT_REQUIRE_REDIS", false),
 		},
 		Scheduler: SchedulerConfig{
 			Embedded:       getEnvBool("EMBEDDED_SCHEDULER", false),

@@ -45,16 +45,29 @@ func main() {
 
 	log.Println("Connected to database")
 
-	// Optional Redis client shared by rate limiting (and, later, caching). When
-	// REDIS_URL is unset the rate limiter falls back to per-process in-memory
-	// counters — correct only for a single API replica.
-	if rdb, err := redisclient.New(cfg.Redis.URL); err != nil {
+	// Configure the rate limiters from env before the router serves traffic.
+	middleware.InitRateLimiters(cfg.RateLimit.DefaultPerMin, cfg.RateLimit.StrictPerMin, cfg.RateLimit.Window)
+
+	// Shared Redis client backs distributed rate limiting (and, later, caching).
+	// When REDIS_URL is unset the limiter falls back to per-process in-memory
+	// counters — correct only for a single API replica. Any multi-replica
+	// deployment MUST set RATE_LIMIT_REQUIRE_REDIS=true so a missing/unreachable
+	// Redis is fatal here rather than silently un-enforcing the global limit.
+	rdb, err := redisclient.New(cfg.Redis.URL)
+	switch {
+	case err != nil:
+		if cfg.RateLimit.RequireRedis {
+			log.Fatalf("RATE_LIMIT_REQUIRE_REDIS is set but Redis is unavailable: %v", err)
+		}
 		log.Printf("[WARN] redis unavailable (%v); rate limiting falls back to in-memory (single-instance only)", err)
-	} else if rdb != nil {
+	case rdb != nil:
 		middleware.SetRedisClient(rdb)
 		defer rdb.Close()
 		log.Println("Connected to Redis — distributed rate limiting enabled")
-	} else {
+	default:
+		if cfg.RateLimit.RequireRedis {
+			log.Fatalf("RATE_LIMIT_REQUIRE_REDIS is set but REDIS_URL is empty; refusing to run with per-process rate limiting")
+		}
 		log.Println("[WARN] REDIS_URL not set; rate limiting is in-memory (single-instance only)")
 	}
 

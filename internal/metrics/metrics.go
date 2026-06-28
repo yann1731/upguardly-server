@@ -39,6 +39,16 @@ var (
 		Help:    "Duration of HTTP requests in seconds.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"method", "path", "status_code"})
+
+	RateLimitBlockedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "upguardly_ratelimit_blocked_total",
+		Help: "Total number of requests rejected (429) by the rate limiter.",
+	}, []string{"limiter"})
+
+	RateLimitRedisErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "upguardly_ratelimit_redis_errors_total",
+		Help: "Total number of Redis errors in the rate limiter that caused it to fail open (degraded to allowing the request). Non-zero means the global limit is not being reliably enforced.",
+	})
 )
 
 func StatusToGaugeValue(status models.Status) float64 {

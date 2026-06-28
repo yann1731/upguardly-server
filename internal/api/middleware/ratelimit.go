@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+
+	"upguardly-backend/internal/metrics"
 )
 
 // redisClient is an optional shared Redis client used for distributed rate
@@ -29,14 +33,24 @@ func SetRedisClient(c *redis.Client) {
 // fixedWindowScript atomically increments a per-IP counter and, on the first
 // increment of a window, sets its expiry. Doing both in one script avoids a
 // window whose key never expires if the process dies between INCR and EXPIRE.
-// Returns the current count.
+// It returns {count, remaining-ttl-ms} so callers can populate RateLimit-*
+// headers without a second round-trip.
 var fixedWindowScript = redis.NewScript(`
 local c = redis.call('INCR', KEYS[1])
 if c == 1 then
   redis.call('PEXPIRE', KEYS[1], ARGV[1])
 end
-return c
+return {c, redis.call('PTTL', KEYS[1])}
 `)
+
+// limitResult is the outcome of a single limiter check. remaining and resetAfter
+// drive the RateLimit-* / Retry-After response headers.
+type limitResult struct {
+	allowed    bool
+	limit      int
+	remaining  int
+	resetAfter time.Duration
+}
 
 // ipBucket tracks request count within a fixed window for a single IP
 // (in-memory fallback only).
@@ -68,34 +82,51 @@ func newRateLimiter(name string, limit int, window time.Duration) *rateLimiter {
 	}
 }
 
-// allow reports whether a request from ip is permitted under the limit.
-func (r *rateLimiter) allow(ip string) bool {
+// allow reports whether a request from ip is permitted under the limit, along
+// with the remaining budget and time until the window resets.
+func (r *rateLimiter) allow(ip string) limitResult {
 	if redisClient != nil {
-		allowed, err := r.allowRedis(ip)
+		res, err := r.allowRedis(ip)
 		if err != nil {
-			// Fail open: a Redis outage must not take the API down. Log so the
-			// degradation is visible, then permit the request.
+			// Fail open: a Redis outage must not take the API down. Count it so
+			// the degradation is visible (the global limit is not enforced while
+			// this is happening), log, then permit the request.
+			metrics.RateLimitRedisErrorsTotal.Inc()
 			log.Printf("[WARN] rate limiter: redis error, failing open: %v", err)
-			return true
+			return limitResult{allowed: true, limit: r.limit, remaining: r.limit, resetAfter: r.window}
 		}
-		return allowed
+		return res
 	}
 	return r.allowMemory(ip)
 }
 
-func (r *rateLimiter) allowRedis(ip string) (bool, error) {
+func (r *rateLimiter) allowRedis(ip string) (limitResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
 	key := fmt.Sprintf("ratelimit:%s:%s", r.name, ip)
-	count, err := fixedWindowScript.Run(ctx, redisClient, []string{key}, r.window.Milliseconds()).Int64()
+	vals, err := fixedWindowScript.Run(ctx, redisClient, []string{key}, r.window.Milliseconds()).Int64Slice()
 	if err != nil {
-		return false, err
+		return limitResult{}, err
 	}
-	return count <= int64(r.limit), nil
+	if len(vals) != 2 {
+		return limitResult{}, fmt.Errorf("unexpected script result length %d", len(vals))
+	}
+	count, ttlMs := vals[0], vals[1]
+
+	resetAfter := r.window
+	if ttlMs > 0 {
+		resetAfter = time.Duration(ttlMs) * time.Millisecond
+	}
+	return limitResult{
+		allowed:    count <= int64(r.limit),
+		limit:      r.limit,
+		remaining:  remaining(r.limit, count),
+		resetAfter: resetAfter,
+	}, nil
 }
 
-func (r *rateLimiter) allowMemory(ip string) bool {
+func (r *rateLimiter) allowMemory(ip string) limitResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -114,24 +145,47 @@ func (r *rateLimiter) allowMemory(ip string) bool {
 	b, exists := r.buckets[ip]
 	if !exists || now.Sub(b.windowStart) > r.window {
 		r.buckets[ip] = &ipBucket{count: 1, windowStart: now}
-		return true
+		return limitResult{allowed: true, limit: r.limit, remaining: remaining(r.limit, 1), resetAfter: r.window}
 	}
 
+	resetAfter := r.window - now.Sub(b.windowStart)
 	if b.count >= r.limit {
-		return false
+		return limitResult{allowed: false, limit: r.limit, remaining: 0, resetAfter: resetAfter}
 	}
 	b.count++
-	return true
+	return limitResult{allowed: true, limit: r.limit, remaining: remaining(r.limit, int64(b.count)), resetAfter: resetAfter}
 }
 
-// Global limiters with sensible defaults.
-var (
-	// defaultLimiter: 300 requests per minute per IP (5 req/s burst tolerance).
-	defaultLimiter = newRateLimiter("default", 300, time.Minute)
+// remaining returns the non-negative budget left in the window after count
+// requests.
+func remaining(limit int, count int64) int {
+	if r := int64(limit) - count; r > 0 {
+		return int(r)
+	}
+	return 0
+}
 
-	// strictLimiter: 30 requests per minute for sensitive write endpoints.
-	strictLimiter = newRateLimiter("strict", 30, time.Minute)
+// Global limiters. Defaults are conservative single-box values; production
+// overrides them via InitRateLimiters using the values from RATE_LIMIT_* env.
+var (
+	defaultLimiter = newRateLimiter("default", 300, time.Minute)
+	strictLimiter  = newRateLimiter("strict", 30, time.Minute)
 )
+
+// InitRateLimiters rebuilds the global limiters with the configured budgets and
+// window. Call once at startup before the router serves traffic (mirrors
+// SetRedisClient). Non-positive values keep the existing default.
+func InitRateLimiters(defaultPerMin, strictPerMin int, window time.Duration) {
+	if window <= 0 {
+		window = time.Minute
+	}
+	if defaultPerMin > 0 {
+		defaultLimiter = newRateLimiter("default", defaultPerMin, window)
+	}
+	if strictPerMin > 0 {
+		strictLimiter = newRateLimiter("strict", strictPerMin, window)
+	}
+}
 
 // clientIP returns the request's client IP. It relies on gin.Context.ClientIP,
 // which honours the engine's trusted-proxy configuration (set via
@@ -147,31 +201,48 @@ func clientIP(c *gin.Context) string {
 	return strings.TrimSpace(ip)
 }
 
-// RateLimit is the default rate limiting middleware (300 req/min per IP).
+// setRateLimitHeaders advertises the budget so clients can self-throttle. Uses
+// the IETF draft RateLimit-* field names; Reset is whole seconds until the
+// window rolls over.
+func setRateLimitHeaders(c *gin.Context, res limitResult) {
+	resetSecs := int(math.Ceil(res.resetAfter.Seconds()))
+	c.Header("RateLimit-Limit", strconv.Itoa(res.limit))
+	c.Header("RateLimit-Remaining", strconv.Itoa(res.remaining))
+	c.Header("RateLimit-Reset", strconv.Itoa(resetSecs))
+}
+
+// enforce applies a limiter to the request: it sets the RateLimit-* headers and,
+// when the budget is exhausted, adds Retry-After, records the block, and aborts
+// with 429.
+func enforce(c *gin.Context, l *rateLimiter) {
+	res := l.allow(clientIP(c))
+	setRateLimitHeaders(c, res)
+	if !res.allowed {
+		retry := int(math.Ceil(res.resetAfter.Seconds()))
+		if retry < 1 {
+			retry = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retry))
+		metrics.RateLimitBlockedTotal.WithLabelValues(l.name).Inc()
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": "Too many requests — please slow down",
+		})
+		return
+	}
+	c.Next()
+}
+
+// RateLimit is the default rate limiting middleware (per-IP global budget).
 func RateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := clientIP(c)
-		if !defaultLimiter.allow(ip) {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "Too many requests — please slow down",
-			})
-			return
-		}
-		c.Next()
+		enforce(c, defaultLimiter)
 	}
 }
 
-// StrictRateLimit is a tighter rate limiter (30 req/min per IP) for
-// mutation endpoints such as monitor creation, invitations, etc.
+// StrictRateLimit is a tighter rate limiter for mutation endpoints such as
+// monitor creation, invitations, etc.
 func StrictRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := clientIP(c)
-		if !strictLimiter.allow(ip) {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "Too many requests — please slow down",
-			})
-			return
-		}
-		c.Next()
+		enforce(c, strictLimiter)
 	}
 }
