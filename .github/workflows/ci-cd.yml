@@ -2,10 +2,13 @@ name: CI/CD — Backend
 
 on:
   push:
+    branches:
+      - main          # -> deploy to staging (continuous)
     tags:
-      - 'v*'
-  # Run the checks (vet/test/migration safety) on every PR. Build + deploy stay
-  # gated to version tags via the per-job `if` below, so PRs never push images.
+      - 'v*'          # -> deploy to production
+  # Run the checks (vet/test/migration safety) on every PR. Build runs on pushes
+  # to main and v* tags; the per-job `if` below keep PRs from pushing images or
+  # deploying, and keep main off production / tags off staging.
   pull_request:
 
 env:
@@ -100,7 +103,9 @@ jobs:
   build:
     name: Build & Push
     needs: ci
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Build on pushes to main (-> staging) and on v* tags (-> production).
+    # PRs are pull_request events and never reach here, so they never push.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,8 +123,14 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            # Full git tag (e.g. v1.2.0) — production pins this via GITHUB_REF_NAME.
+            type=ref,event=tag
+            # Bare semver (1.2.0) as a convenience alias on releases.
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            # Commit SHA on every build — staging pins this (main has no tag).
+            type=sha,prefix=,format=long
+            # `latest` only on releases, never on a main build.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -132,33 +143,37 @@ jobs:
 
   deploy-staging:
     name: Deploy → Staging
+    # Continuous staging: every push to main deploys the freshly built image —
+    # pinned by full commit SHA (main has no version tag) — to the staging
+    # server. Staging is decoupled from production (which ships on v* tags).
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
     steps:
-      - id: tag
-        run: echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
       - uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.BACKEND_SERVER_HOST }}
-          username: ${{ secrets.BACKEND_SERVER_USER }}
-          key: ${{ secrets.BACKEND_SERVER_SSH_KEY }}
-          port: ${{ secrets.BACKEND_SERVER_PORT }}
+          host: ${{ secrets.STAGING_SERVER_HOST }}
+          username: ${{ secrets.STAGING_SERVER_USER }}
+          key: ${{ secrets.STAGING_SERVER_SSH_KEY }}
+          port: ${{ secrets.STAGING_SERVER_PORT }}
           script: |
             set -euo pipefail
             cd /opt/upguardly/staging
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
-            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
+            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ github.sha }}|" .env
             # --ignore-buildable skips the locally-built db image (pgBackRest);
             # --build (re)builds it on the host before starting.
             docker compose pull --ignore-buildable
             docker compose up -d --build --remove-orphans
-            timeout 60 bash -c 'until curl -sf http://localhost:8081/v1/health; do sleep 3; done'
+            timeout 60 bash -c 'until curl -sf http://localhost:8080/v1/health; do sleep 3; done'
 
   deploy-production:
     name: Deploy → Production
-    needs: deploy-staging
+    # Production ships only on v* tags. `build` also runs for main pushes (for
+    # staging), so this `if` is required to keep main off production.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: production
     steps:
