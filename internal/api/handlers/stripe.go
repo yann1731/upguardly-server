@@ -14,4 +14,5 @@ type StripeService interface {
 	CreatePortalSession(customerID, returnURL string) (string, error)
 	ParseWebhook(payload []byte, sig string) (stripe.Event, error)
 	CancelSubscription(subID string) error
+	GetCustomer(customerID string) (*stripe.Customer, error)
 }

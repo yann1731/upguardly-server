@@ -242,6 +242,9 @@ func (f *fakeStripe) ParseWebhook(_ []byte, _ string) (stripe.Event, error) {
 func (f *fakeStripe) CancelSubscription(_ string) error {
 	return f.portalErr
 }
+func (f *fakeStripe) GetCustomer(customerID string) (*stripe.Customer, error) {
+	return &stripe.Customer{ID: customerID, Metadata: map[string]string{"user_id": testUserID}}, nil
+}
 
 func doRequest(router *gin.Engine, method, path string, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()

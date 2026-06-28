@@ -222,8 +222,8 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	userID, ok := sub.Customer.Metadata["user_id"]
-	if !ok || userID == "" {
+	userID, ok := h.getUserIDFromCustomer(sub.Customer)
+	if !ok {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
@@ -270,8 +270,8 @@ func (h *Handlers) handleSubscriptionDeleted(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	userID, ok := sub.Customer.Metadata["user_id"]
-	if !ok || userID == "" {
+	userID, ok := h.getUserIDFromCustomer(sub.Customer)
+	if !ok {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
@@ -300,8 +300,8 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		return
 	}
 
-	userID, ok := inv.Customer.Metadata["user_id"]
-	if !ok || userID == "" {
+	userID, ok := h.getUserIDFromCustomer(inv.Customer)
+	if !ok {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
@@ -387,4 +387,23 @@ func (h *Handlers) planFromPriceID(priceID string) (string, error) {
 		return "ENTERPRISE", nil
 	}
 	return "", fmt.Errorf("unrecognised price ID: %s", priceID)
+}
+
+func (h *Handlers) getUserIDFromCustomer(customer *stripe.Customer) (string, bool) {
+	if customer == nil {
+		return "", false
+	}
+	if customer.Metadata != nil {
+		if id, ok := customer.Metadata["user_id"]; ok && id != "" {
+			return id, true
+		}
+	}
+	// Webhook payloads typically don't expand the Customer object, so Metadata is nil.
+	// We must fetch the Customer from Stripe to read its metadata.
+	cust, err := h.stripe.GetCustomer(customer.ID)
+	if err != nil || cust == nil {
+		return "", false
+	}
+	id, ok := cust.Metadata["user_id"]
+	return id, ok && id != ""
 }

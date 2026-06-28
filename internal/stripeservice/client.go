@@ -114,3 +114,8 @@ func (c *Client) CancelSubscription(subID string) error {
 	_, err := subscription.Cancel(subID, params)
 	return err
 }
+
+// GetCustomer retrieves a customer by ID from Stripe.
+func (c *Client) GetCustomer(customerID string) (*stripe.Customer, error) {
+	return customer.Get(customerID, nil)
+}
