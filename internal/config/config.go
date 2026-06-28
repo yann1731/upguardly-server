@@ -127,8 +127,8 @@ func Load() *Config {
 			URL: getEnv("REDIS_URL", ""),
 		},
 		RateLimit: RateLimitConfig{
-			DefaultPerMin: getEnvInt("RATE_LIMIT_DEFAULT_PER_MIN", 600),
-			StrictPerMin:  getEnvInt("RATE_LIMIT_STRICT_PER_MIN", 60),
+			DefaultPerMin: getEnvInt("RATE_LIMIT_DEFAULT_PER_MIN", 5000),
+			StrictPerMin:  getEnvInt("RATE_LIMIT_STRICT_PER_MIN", 120),
 			Window:        time.Duration(getEnvInt("RATE_LIMIT_WINDOW_SECONDS", 60)) * time.Second,
 			RequireRedis:  getEnvBool("RATE_LIMIT_REQUIRE_REDIS", false),
 		},
