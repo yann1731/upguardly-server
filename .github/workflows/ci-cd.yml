@@ -161,12 +161,14 @@ jobs:
             set -euo pipefail
             cd /opt/upguardly/staging
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
-            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ github.sha }}|" .env
+            sed -i "s|^SERVER_IMAGE_TAG=.*|SERVER_IMAGE_TAG=${{ github.sha }}|" .env
             # --ignore-buildable skips the locally-built db image (pgBackRest);
             # --build (re)builds it on the host before starting.
             docker compose pull --ignore-buildable
             docker compose up -d --build --remove-orphans
-            timeout 60 bash -c 'until curl -sf http://localhost:8080/v1/health; do sleep 3; done'
+            # Health-check in-container: server no longer publishes a host port
+            # (Caddy fronts everything).
+            timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://localhost:8080/v1/health >/dev/null; do sleep 3; done'
 
   deploy-production:
     name: Deploy → Production
@@ -182,17 +184,19 @@ jobs:
 
       - uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.BACKEND_SERVER_HOST }}
-          username: ${{ secrets.BACKEND_SERVER_USER }}
-          key: ${{ secrets.BACKEND_SERVER_SSH_KEY }}
-          port: ${{ secrets.BACKEND_SERVER_PORT }}
+          host: ${{ secrets.PRODUCTION_SERVER_HOST }}
+          username: ${{ secrets.PRODUCTION_SERVER_USER }}
+          key: ${{ secrets.PRODUCTION_SERVER_SSH_KEY }}
+          port: ${{ secrets.PRODUCTION_SERVER_PORT }}
           script: |
             set -euo pipefail
             cd /opt/upguardly/production
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
-            sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
+            sed -i "s|^SERVER_IMAGE_TAG=.*|SERVER_IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
             # --ignore-buildable skips the locally-built db image (pgBackRest);
             # --build (re)builds it on the host before starting.
             docker compose pull --ignore-buildable
             docker compose up -d --build --remove-orphans
-            timeout 60 bash -c 'until curl -sf http://localhost:8080/v1/health; do sleep 3; done'
+            # Health-check in-container: server no longer publishes a host port
+            # (Caddy fronts everything).
+            timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://localhost:8080/v1/health >/dev/null; do sleep 3; done'
