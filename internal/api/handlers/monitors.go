@@ -76,6 +76,14 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		return
 	}
 
+	// Enforce the resolved plan's minimum check interval.
+	if req.Interval < limits.MinInterval {
+		c.JSON(http.StatusPaymentRequired, gin.H{
+			"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", limits.MinInterval),
+		})
+		return
+	}
+
 	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, req.Interval, req.Timeout, *req.Enabled)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})
@@ -142,6 +150,29 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 	if err := req.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// If the interval is being changed, enforce the plan's minimum interval for
+	// the monitor's owning scope (org owner's plan for org monitors, otherwise
+	// the user's own plan).
+	if req.Interval != nil {
+		existing, err := h.store.GetMonitor(c.Request.Context(), id, userId)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+			return
+		}
+		var plan string
+		if existing.OrgID != nil && *existing.OrgID != "" {
+			plan = h.planForOrg(c.Request.Context(), *existing.OrgID)
+		} else {
+			plan = h.planForUser(c.Request.Context(), userId)
+		}
+		if minInterval := models.LimitsForPlan(plan).MinInterval; *req.Interval < minInterval {
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", minInterval),
+			})
+			return
+		}
 	}
 
 	// If target or type is being updated, re-validate for SSRF.
