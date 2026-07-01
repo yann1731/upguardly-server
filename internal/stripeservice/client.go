@@ -2,6 +2,7 @@ package stripeservice
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/stripe/stripe-go/v76"
 	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
@@ -59,13 +60,23 @@ func (c *Client) EnsureCustomer(userID, name string) (string, error) {
 
 // FindCustomerByUser returns the Stripe customer ID whose user_id metadata
 // matches userID, or "" if none exists. It never creates a customer.
+//
+// This uses the Customer Search API (one indexed query) rather than listing
+// every customer and scanning metadata client-side, which was O(all
+// customers) in paginated API calls per lookup. Search is eventually
+// consistent (up to ~1 minute); callers that just created a customer must
+// hold on to the returned ID rather than relying on an immediate re-search.
 func (c *Client) FindCustomerByUser(userID string) (string, error) {
-	iter := customer.List(&stripe.CustomerListParams{})
+	params := &stripe.CustomerSearchParams{
+		SearchParams: stripe.SearchParams{
+			Query: fmt.Sprintf("metadata['user_id']:'%s'", strings.ReplaceAll(userID, "'", "\\'")),
+			Limit: stripe.Int64(1),
+		},
+	}
+
+	iter := customer.Search(params)
 	for iter.Next() {
-		cust := iter.Customer()
-		if cust.Metadata["user_id"] == userID {
-			return cust.ID, nil
-		}
+		return iter.Customer().ID, nil
 	}
 	if err := iter.Err(); err != nil {
 		return "", fmt.Errorf("failed to search customers: %w", err)

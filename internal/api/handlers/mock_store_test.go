@@ -221,6 +221,7 @@ type fakeStripe struct {
 	cancelErr  error                // returned by SetCancelAtPeriodEnd
 
 	lastCancelAtPeriodEnd *bool // records the last SetCancelAtPeriodEnd value
+	ensureCalled          bool  // records whether EnsureCustomer was called
 }
 
 func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
@@ -234,6 +235,7 @@ func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
 	}
 }
 func (f *fakeStripe) EnsureCustomer(_, _ string) (string, error) {
+	f.ensureCalled = true
 	return f.customerID, f.ensureErr
 }
 func (f *fakeStripe) CreateCheckoutSession(_, _, _, _ string) (string, error) {

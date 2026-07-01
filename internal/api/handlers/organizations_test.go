@@ -45,6 +45,20 @@ func TestCreateOrg(t *testing.T) {
 		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
 
+	t.Run("canceled enterprise subscription is rejected (402)", func(t *testing.T) {
+		// A CANCELED status carries no entitlement even though the stored
+		// plan name is still ENTERPRISE (e.g. the subscription went unpaid).
+		sub := aSubscription("ENTERPRISE")
+		sub.Status = "CANCELED"
+		store := &mockStore{subResult: sub}
+		router, h := newTestRouter(store)
+		router.POST("/v1/organizations", h.CreateOrg)
+
+		w := doRequest(router, "POST", "/v1/organizations", `{"name":"Acme"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
 	t.Run("user already in an org returns 409", func(t *testing.T) {
 		store := &mockStore{
 			subResult:  aSubscription("ENTERPRISE"),

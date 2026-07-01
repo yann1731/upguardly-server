@@ -186,11 +186,35 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 	}
 
 	// The Stripe customer is keyed on the user (the billing subject); user_id
-	// metadata is what the webhooks resolve the subscription back to.
-	customerID, err := h.stripe.EnsureCustomer(userId, "")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create billing customer"})
-		return
+	// metadata is what the webhooks resolve the subscription back to. Prefer
+	// the customer ID already stored on the subscription record so repeat
+	// checkouts never hit Stripe's customer search.
+	var customerID string
+	dbSub, subErr := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
+	if subErr == nil && dbSub.StripeCustomerID != nil && *dbSub.StripeCustomerID != "" {
+		customerID = *dbSub.StripeCustomerID
+	} else {
+		customerID, err = h.stripe.EnsureCustomer(userId, "")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create billing customer"})
+			return
+		}
+
+		// Persist the ID immediately (not just via webhook) so later lookups
+		// and reconciles skip the search — Stripe search is eventually
+		// consistent, so a re-search right after creation can miss.
+		plan, status := "FREE", "ACTIVE"
+		if subErr == nil {
+			plan, status = dbSub.Plan, dbSub.Status
+		}
+		if _, upErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+			UserID:           userId,
+			Plan:             plan,
+			Status:           status,
+			StripeCustomerID: &customerID,
+		}); upErr != nil {
+			log.Printf("checkout: failed to persist stripe customer id for user %s: %v", userId, upErr)
+		}
 	}
 
 	redirectURL, err := h.stripe.CreateCheckoutSession(customerID, priceID, successURL, cancelURL)
@@ -395,8 +419,10 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		return
 	}
 
-	// Fetch current plan to preserve it while marking payment as past-due.
-	existingPlan := "PRO"
+	// Fetch the current plan to preserve it while marking payment as
+	// past-due. A user with no subscription record has nothing to preserve —
+	// default to FREE, never to a paid plan.
+	existingPlan := "FREE"
 	if sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userID); err == nil {
 		existingPlan = sub.Plan
 	}
@@ -444,18 +470,23 @@ func (h *Handlers) CancelSubscription(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": sub.Status, "cancelAtPeriodEnd": true})
 }
 
+// mapStripeStatus maps a Stripe subscription status to the internal enum.
+// Statuses that carry no entitlement all collapse to CANCELED: "unpaid" means
+// payment retries are exhausted (Stripe never emits a deleted event for it),
+// "incomplete"/"incomplete_expired" mean the initial payment never succeeded,
+// and "paused" means a trial ended without a payment method. Unknown (future)
+// statuses also map to CANCELED — defaulting to ACTIVE would grant paid
+// access on any status this code doesn't recognise.
 func mapStripeStatus(s string) string {
 	switch s {
 	case "active":
 		return "ACTIVE"
 	case "past_due":
 		return "PAST_DUE"
-	case "canceled":
-		return "CANCELED"
 	case "trialing":
 		return "TRIALING"
 	default:
-		return "ACTIVE"
+		return "CANCELED"
 	}
 }
 

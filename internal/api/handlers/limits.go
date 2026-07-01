@@ -2,11 +2,19 @@ package handlers
 
 import "context"
 
-// planForUser resolves the subscription plan name for a user (the billing
-// subject), defaulting to FREE when no subscription record exists.
+// planForUser resolves the effective plan for a user (the billing subject),
+// defaulting to FREE when no subscription record exists.
+//
+// Entitlement requires a live status: ACTIVE and TRIALING are entitled, and
+// PAST_DUE keeps access as a grace period while Stripe retries the payment.
+// CANCELED — which terminal Stripe statuses like unpaid and incomplete also
+// map to — carries no entitlement, so the stored plan name is ignored.
 func (h *Handlers) planForUser(ctx context.Context, userID string) string {
 	sub, err := h.store.GetSubscriptionByUser(ctx, userID)
 	if err != nil || sub == nil {
+		return "FREE"
+	}
+	if sub.Status == "CANCELED" {
 		return "FREE"
 	}
 	return sub.Plan

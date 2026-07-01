@@ -141,6 +141,38 @@ func TestCreateCheckout(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "https://checkout.example/session")
 	})
+
+	t.Run("stored customer id skips the Stripe customer lookup", func(t *testing.T) {
+		sub := aSubscription("FREE")
+		cust := "cus_stored"
+		sub.StripeCustomerID = &cust
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{proPriceID: "price_pro", checkoutURL: "https://checkout.example/session"}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/organizations/:id/subscription", h.CreateCheckout)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription", `{"plan":"PRO"}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.False(t, fs.ensureCalled, "EnsureCustomer must not be called when a customer ID is already stored")
+	})
+
+	t.Run("newly resolved customer id is persisted", func(t *testing.T) {
+		store := &mockStore{} // no subscription record yet
+		fs := &fakeStripe{proPriceID: "price_pro", customerID: "cus_new", checkoutURL: "https://checkout.example/session"}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/organizations/:id/subscription", h.CreateCheckout)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription", `{"plan":"PRO"}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.True(t, fs.ensureCalled)
+		require.NotNil(t, store.lastUpsertSub)
+		require.NotNil(t, store.lastUpsertSub.StripeCustomerID)
+		assert.Equal(t, "cus_new", *store.lastUpsertSub.StripeCustomerID)
+		// Persisting the customer ID must not grant a plan.
+		assert.Equal(t, "FREE", store.lastUpsertSub.Plan)
+	})
 }
 
 func TestCreatePortal(t *testing.T) {
@@ -223,6 +255,28 @@ func TestStripeWebhook(t *testing.T) {
 		assert.Equal(t, testUserID, store.lastUpsertSub.UserID)
 	})
 
+	t.Run("unpaid status is stored as CANCELED, never ACTIVE", func(t *testing.T) {
+		// "unpaid" means payment retries are exhausted; Stripe never emits a
+		// deleted event for it, so this webhook is the only signal. Mapping
+		// it (or any unknown status) to ACTIVE would grant a free ride.
+		store := &mockStore{}
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			event: stripe.Event{
+				Type: "customer.subscription.updated",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSONWithStatus("price_pro", "unpaid"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.Equal(t, "CANCELED", store.lastUpsertSub.Status)
+	})
+
 	t.Run("subscription.deleted downgrades to FREE/CANCELED", func(t *testing.T) {
 		store := &mockStore{}
 		fs := &fakeStripe{
@@ -265,9 +319,13 @@ func TestStripeWebhook(t *testing.T) {
 // subscriptionEventJSON builds a Stripe subscription payload carrying the
 // user_id metadata and a single line item with the given price ID.
 func subscriptionEventJSON(priceID string) string {
+	return subscriptionEventJSONWithStatus(priceID, "active")
+}
+
+func subscriptionEventJSONWithStatus(priceID, status string) string {
 	return `{
 		"id": "sub_1",
-		"status": "active",
+		"status": "` + status + `",
 		"customer": {"id": "cus_1", "metadata": {"user_id": "test-user-id"}},
 		"items": {"data": [{"price": {"id": "` + priceID + `"}}]},
 		"current_period_start": 1700000000,
