@@ -2,7 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,70 +13,48 @@ import (
 	"upguardly-backend/internal/coordination"
 	"upguardly-backend/internal/database"
 	db "upguardly-backend/internal/database/prisma"
-	"upguardly-backend/internal/models"
-	"upguardly-backend/internal/monitor"
-	"upguardly-backend/internal/statestore"
 )
 
 type DistributedScheduler struct {
 	db           *database.Client
-	alertManager *alerter.Manager
+	runner       *checkRunner
 	coordinator  *coordination.Coordinator
 	partitions   *coordination.PartitionManager
-	stateStore   *statestore.SQLiteStore
 	syncInterval time.Duration
 
-	jobs   map[string]context.CancelFunc
-	mu     sync.RWMutex
-	stopCh chan struct{}
-	doneCh chan struct{}
+	jobs     map[string]*job
+	mu       sync.RWMutex
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	doneCh   chan struct{}
 }
 
 func NewDistributedScheduler(
-	db *database.Client,
+	dbc *database.Client,
 	alertManager *alerter.Manager,
 	coordinator *coordination.Coordinator,
 	partitions *coordination.PartitionManager,
-	stateStore *statestore.SQLiteStore,
 	syncInterval time.Duration,
 ) *DistributedScheduler {
 	return &DistributedScheduler{
-		db:           db,
-		alertManager: alertManager,
+		db:           dbc,
+		runner:       newCheckRunner(dbc, alertManager),
 		coordinator:  coordinator,
 		partitions:   partitions,
-		stateStore:   stateStore,
 		syncInterval: syncInterval,
-		jobs:         make(map[string]context.CancelFunc),
+		jobs:         make(map[string]*job),
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 	}
 }
 
 func (s *DistributedScheduler) Start(ctx context.Context) error {
-	if err := s.loadStateFromSQLite(); err != nil {
-		log.Printf("Warning: failed to load state from SQLite: %v", err)
-	}
-
 	eventCh := make(chan coordination.MembershipEvent, 10)
 	if err := s.coordinator.WatchInstances(ctx, eventCh); err != nil {
 		return err
 	}
 
 	go s.run(ctx, eventCh)
-
-	return nil
-}
-
-func (s *DistributedScheduler) loadStateFromSQLite() error {
-	state, err := s.stateStore.GetInstanceState()
-	if err != nil {
-		return err
-	}
-
-	if state != nil {
-		log.Printf("Recovered state: %d partitions from previous run", len(state.Partitions))
-	}
 
 	return nil
 }
@@ -91,17 +72,33 @@ func (s *DistributedScheduler) run(ctx context.Context, eventCh <-chan coordinat
 		case <-s.stopCh:
 			return
 		case event := <-eventCh:
-			s.handleMembershipChange(ctx, event)
+			log.Printf("Membership change: %d instances", len(event.Instances))
+			s.applyOwnership(event.Instances)
+			s.syncMonitors(ctx)
 		case <-ticker.C:
+			// Periodic backstop: re-list membership from etcd so a missed or
+			// coalesced watch event can never leave ownership stale for more
+			// than one sync interval.
+			if instances, err := s.coordinator.Reconcile(ctx); err != nil {
+				log.Printf("Warning: failed to reconcile membership: %v", err)
+			} else {
+				s.applyOwnership(instances)
+			}
 			s.syncMonitors(ctx)
 		}
 	}
 }
 
-func (s *DistributedScheduler) handleMembershipChange(ctx context.Context, event coordination.MembershipEvent) {
-	log.Printf("Membership change: %d instances", len(event.Instances))
-
-	delta := s.partitions.RecalculateOwnership(event.Instances)
+// applyOwnership recalculates partition ownership from the given membership
+// and stops jobs for partitions this instance no longer owns. It is a no-op
+// when ownership is unchanged. This instance may legitimately be absent from
+// the list (e.g. its lease expired before the keepalive re-registered); in
+// that case it owns nothing until it reappears.
+func (s *DistributedScheduler) applyOwnership(instances []string) {
+	delta := s.partitions.RecalculateOwnership(instances)
+	if len(delta.Lost) == 0 && len(delta.Gained) == 0 {
+		return
+	}
 
 	if len(delta.Lost) > 0 {
 		log.Printf("Lost %d partitions: %v", len(delta.Lost), delta.Lost)
@@ -112,17 +109,7 @@ func (s *DistributedScheduler) handleMembershipChange(ctx context.Context, event
 		log.Printf("Gained %d partitions: %v", len(delta.Gained), delta.Gained)
 	}
 
-	ownedPartitions := s.partitions.GetOwnedPartitions()
-	log.Printf("Now owning %d partitions", len(ownedPartitions))
-
-	if err := s.stateStore.SaveInstanceState(
-		s.coordinator.GetInstances()[s.coordinator.GetInstanceIndex()],
-		ownedPartitions,
-	); err != nil {
-		log.Printf("Warning: failed to save instance state: %v", err)
-	}
-
-	s.syncMonitors(ctx)
+	log.Printf("Now owning %d partitions", len(s.partitions.GetOwnedPartitions()))
 }
 
 func (s *DistributedScheduler) stopJobsForPartitions(partitions []int) {
@@ -134,21 +121,85 @@ func (s *DistributedScheduler) stopJobsForPartitions(partitions []int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for monitorID, cancel := range s.jobs {
+	for monitorID, j := range s.jobs {
 		partition := s.partitions.CalculatePartition(monitorID)
 		if partitionSet[partition] {
-			cancel()
+			j.cancel()
 			delete(s.jobs, monitorID)
 			log.Printf("Stopped job for monitor %s (partition %d no longer owned)", monitorID, partition)
 		}
 	}
 }
 
-func (s *DistributedScheduler) syncMonitors(ctx context.Context) {
-	monitors, err := s.db.Prisma.Monitor.FindMany(
-		db.Monitor.Enabled.Equals(true),
-	).Exec(ctx)
+// fetchOwnedMonitors returns the enabled monitors in partitions this instance
+// owns. The partition filter runs in SQL (see PartitionSQLExpr), so each
+// instance's sync cost scales with the monitors it owns rather than every
+// instance scanning the entire table.
+func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.MonitorModel, error) {
+	owned := s.partitions.GetOwnedPartitions()
+	if len(owned) == 0 {
+		return nil, nil
+	}
 
+	// Owning everything (e.g. a single instance): a plain query is cheaper.
+	if len(owned) == s.partitions.PartitionCount() {
+		return s.db.Prisma.Monitor.FindMany(
+			db.Monitor.Enabled.Equals(true),
+		).Exec(ctx)
+	}
+
+	ids := make([]string, len(owned))
+	for i, p := range owned {
+		ids[i] = strconv.Itoa(p)
+	}
+
+	// Identifiers and the IN list are internally generated integers/constants,
+	// never user input, so string assembly is safe here.
+	query := fmt.Sprintf(
+		`SELECT id, user_id AS "userId", org_id AS "orgId", name, type, target,
+		        "interval", timeout, enabled, created_at AS "createdAt", updated_at AS "updatedAt"
+		 FROM monitors
+		 WHERE enabled = true AND %s IN (%s)`,
+		s.partitions.PartitionSQLExpr(),
+		strings.Join(ids, ","),
+	)
+
+	var raws []db.RawMonitorModel
+	if err := s.db.Prisma.Prisma.QueryRaw(query).Exec(ctx, &raws); err != nil {
+		return nil, err
+	}
+
+	monitors := make([]db.MonitorModel, len(raws))
+	for i := range raws {
+		monitors[i] = rawToMonitor(&raws[i])
+	}
+	return monitors, nil
+}
+
+func rawToMonitor(r *db.RawMonitorModel) db.MonitorModel {
+	m := db.MonitorModel{
+		InnerMonitor: db.InnerMonitor{
+			ID:        string(r.ID),
+			UserID:    string(r.UserID),
+			Name:      string(r.Name),
+			Type:      db.MonitorType(r.Type),
+			Target:    string(r.Target),
+			Interval:  int(r.Interval),
+			Timeout:   int(r.Timeout),
+			Enabled:   bool(r.Enabled),
+			CreatedAt: r.CreatedAt.Time,
+			UpdatedAt: r.UpdatedAt.Time,
+		},
+	}
+	if r.OrgID != nil {
+		v := string(*r.OrgID)
+		m.InnerMonitor.OrgID = &v
+	}
+	return m
+}
+
+func (s *DistributedScheduler) syncMonitors(ctx context.Context) {
+	monitors, err := s.fetchOwnedMonitors(ctx)
 	if err != nil {
 		log.Printf("Failed to fetch monitors: %v", err)
 		return
@@ -157,164 +208,58 @@ func (s *DistributedScheduler) syncMonitors(ctx context.Context) {
 	activeIDs := make(map[string]bool)
 
 	for _, m := range monitors {
+		// Belt and suspenders: the query already filters by owned partition,
+		// but ownership may have changed while the query ran.
 		if !s.partitions.IsMonitorOwned(m.ID) {
 			continue
 		}
 
 		activeIDs[m.ID] = true
-
-		s.mu.RLock()
-		_, exists := s.jobs[m.ID]
-		s.mu.RUnlock()
-
-		if !exists {
-			s.startMonitorJob(ctx, &m)
-		}
+		s.reconcileJob(ctx, &m)
 	}
 
 	s.mu.Lock()
-	for id, cancel := range s.jobs {
+	for id, j := range s.jobs {
 		if !activeIDs[id] {
-			cancel()
+			j.cancel()
 			delete(s.jobs, id)
-			if err := s.stateStore.DeleteMonitorStatus(id); err != nil {
-				log.Printf("Warning: failed to delete monitor status: %v", err)
-			}
 		}
 	}
 	s.mu.Unlock()
+}
+
+// reconcileJob ensures a job is running for m with its current config,
+// restarting it when the monitor row changed since the job started.
+func (s *DistributedScheduler) reconcileJob(ctx context.Context, m *db.MonitorModel) {
+	s.mu.RLock()
+	j, exists := s.jobs[m.ID]
+	s.mu.RUnlock()
+
+	if exists {
+		if j.updatedAt.Equal(m.UpdatedAt) {
+			return
+		}
+		j.cancel()
+		log.Printf("Monitor %s config changed, restarting job", m.ID)
+	}
+
+	s.startMonitorJob(ctx, m)
 }
 
 func (s *DistributedScheduler) startMonitorJob(parentCtx context.Context, m *db.MonitorModel) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s.mu.Lock()
-	s.jobs[m.ID] = cancel
+	s.jobs[m.ID] = &job{cancel: cancel, updatedAt: m.UpdatedAt}
 	s.mu.Unlock()
 
-	partition := s.partitions.CalculatePartition(m.ID)
+	go s.runner.jobLoop(ctx, m)
 
-	go func() {
-		ticker := time.NewTicker(time.Duration(m.Interval) * time.Second)
-		defer ticker.Stop()
-
-		s.runCheck(ctx, m)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				freshMonitor, err := s.db.Prisma.Monitor.FindUnique(
-					db.Monitor.ID.Equals(m.ID),
-				).Exec(ctx)
-				if err != nil {
-					continue
-				}
-				s.runCheck(ctx, freshMonitor)
-			}
-		}
-	}()
-
-	log.Printf("Started monitoring job for %s (%s) on partition %d", m.Name, m.ID, partition)
-}
-
-func (s *DistributedScheduler) runCheck(ctx context.Context, m *db.MonitorModel) {
-	checker := monitor.NewChecker(models.MonitorType(m.Type))
-	if checker == nil {
-		log.Printf("Unknown monitor type: %s", m.Type)
-		return
-	}
-
-	timeout := time.Duration(m.Timeout) * time.Second
-	result := checker.Check(ctx, m.Target, timeout)
-
-	s.saveResult(ctx, m.ID, &result)
-	recordIncident(ctx, s.db, m.ID, &result)
-
-	lastStatus, hasLast, err := s.stateStore.GetLastStatus(m.ID)
-	if err != nil {
-		log.Printf("Warning: failed to get last status: %v", err)
-	}
-
-	if !hasLast || lastStatus != result.Status {
-		if err := s.stateStore.SetLastStatus(m.ID, result.Status); err != nil {
-			log.Printf("Warning: failed to save status: %v", err)
-		}
-
-		if hasLast {
-			s.sendAlerts(ctx, m, &result)
-		}
-	}
-
-	log.Printf("Monitor %s: %s (latency: %dms)", m.Name, result.Status, result.Latency)
-}
-
-func (s *DistributedScheduler) saveResult(ctx context.Context, monitorID string, result *models.CheckResult) {
-	var optionalParams []db.MonitorResultSetParam
-
-	optionalParams = append(optionalParams, db.MonitorResult.Message.Set(result.Message))
-
-	if result.StatusCode != nil {
-		optionalParams = append(optionalParams, db.MonitorResult.StatusCode.Set(*result.StatusCode))
-	}
-
-	_, err := s.db.Prisma.MonitorResult.CreateOne(
-		db.MonitorResult.Monitor.Link(db.Monitor.ID.Equals(monitorID)),
-		db.MonitorResult.Status.Set(db.Status(result.Status)),
-		db.MonitorResult.Latency.Set(result.Latency),
-		optionalParams...,
-	).Exec(ctx)
-
-	if err != nil {
-		log.Printf("Failed to save monitor result: %v", err)
-	}
-}
-
-func (s *DistributedScheduler) sendAlerts(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) {
-	alerts, err := s.db.Prisma.Alert.FindMany(
-		db.Alert.MonitorID.Equals(m.ID),
-		db.Alert.Enabled.Equals(true),
-	).Exec(ctx)
-
-	if err != nil {
-		log.Printf("Failed to fetch alerts: %v", err)
-		return
-	}
-
-	mon := &models.Monitor{
-		ID:     m.ID,
-		Name:   m.Name,
-		Type:   models.MonitorType(m.Type),
-		Target: m.Target,
-	}
-
-	for _, alert := range alerts {
-		err := s.alertManager.Send(ctx, models.AlertChannel(alert.Channel), alert.Target, mon, result)
-		if err != nil {
-			log.Printf("Failed to send %s alert: %v", alert.Channel, err)
-		} else {
-			log.Printf("Sent %s alert for %s", alert.Channel, m.Name)
-		}
-
-		s.saveAlertHistory(ctx, alert.ID, result)
-	}
-}
-
-func (s *DistributedScheduler) saveAlertHistory(ctx context.Context, alertID string, result *models.CheckResult) {
-	_, err := s.db.Prisma.AlertHistory.CreateOne(
-		db.AlertHistory.Alert.Link(db.Alert.ID.Equals(alertID)),
-		db.AlertHistory.Status.Set(db.Status(result.Status)),
-		db.AlertHistory.Message.Set(result.Message),
-	).Exec(ctx)
-
-	if err != nil {
-		log.Printf("Failed to save alert history: %v", err)
-	}
+	log.Printf("Started monitoring job for %s (%s) on partition %d", m.Name, m.ID, s.partitions.CalculatePartition(m.ID))
 }
 
 func (s *DistributedScheduler) Stop() {
-	close(s.stopCh)
+	s.stopOnce.Do(func() { close(s.stopCh) })
 
 	select {
 	case <-s.doneCh:
@@ -323,12 +268,13 @@ func (s *DistributedScheduler) Stop() {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for id, cancel := range s.jobs {
-		cancel()
+	for id, j := range s.jobs {
+		j.cancel()
 		delete(s.jobs, id)
 	}
+	s.mu.Unlock()
+
+	s.runner.stop()
 }
 
 func (s *DistributedScheduler) GetActiveJobCount() int {

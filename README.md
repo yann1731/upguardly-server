@@ -43,7 +43,6 @@ The codebase ships **two binaries**:
 - **Auth:** [SuperTokens](https://supertokens.com/) (email/password + sessions)
 - **Billing:** [Stripe](https://github.com/stripe/stripe-go) (`stripe-go/v76`)
 - **Distributed coordination:** [etcd](https://etcd.io/) v3 (leases + watches)
-- **Local scheduler state:** SQLite (`mattn/go-sqlite3`, WAL mode)
 - **Metrics:** Prometheus (`prometheus/client_golang`)
 - **Email:** SMTP via `gomail`
 - **Config:** environment variables (`joho/godotenv` loads `.env` in dev)
@@ -71,9 +70,8 @@ The codebase ships **two binaries**:
    ┌────────────────────────────────┴───────────────────────────────┐
    │  scheduler × N  (cmd/scheduler)                                  │
    │  ├─ etcd lease + membership watch  ──▶  partition ownership      │
-   │  ├─ owns subset of monitors (crc32(monitorID) % partitionCount) │
-   │  ├─ runs per‑monitor ticker goroutines                          │
-   │  └─ SQLite: last‑known status + recovered partition state       │
+   │  ├─ owns subset of monitors (md5(monitorID) % partitionCount)  │
+   │  └─ runs per‑monitor ticker goroutines                          │
    └─────────────────────────────────────────────────────────────────┘
 
 * The single `server` process also runs an in‑process `scheduler.Scheduler`
@@ -84,9 +82,12 @@ The codebase ships **two binaries**:
 There are **two scheduler implementations** that share the same check/alert logic:
 
 - `scheduler.Scheduler` — embedded in `cmd/server`. Runs every enabled monitor on
-  this single process. State (last status) kept in memory.
+  this single process.
 - `scheduler.DistributedScheduler` — used by `cmd/scheduler`. Only runs monitors
-  whose partition this instance owns. State persisted to SQLite for crash recovery.
+  whose partition this instance owns.
+
+Both derive alerting decisions from the open‑incident row in Postgres, so alert
+state survives restarts and partition handoffs with no instance‑local storage.
 
 ---
 
@@ -109,7 +110,6 @@ internal/
   monitor/                 # checkers: http.go, port.go, ping.go + SSRF validate.go
   scheduler/               # scheduler.go (embedded) + distributed.go
   coordination/            # etcd coordinator + partition manager
-  statestore/              # SQLite state store for the distributed scheduler
   stripeservice/           # Stripe client wrapper (checkout, portal, webhooks)
   metrics/                 # Prometheus metric definitions
   models/                  # domain types, the Store interface, request DTOs
@@ -262,11 +262,13 @@ For scale‑out, run multiple `cmd/scheduler` instances. Coordination lives in
   `/upguardly/schedulers/instances/<id>` with a **lease** (TTL keep‑alive). It
   watches that prefix and emits `MembershipEvent`s whenever instances join/leave.
 - **`PartitionManager`** (`partition.go`) maps every monitor to a partition with
-  `crc32(monitorID) % partitionCount`, and assigns partition `p` to the instance at
+  `md5(monitorID) % partitionCount` (md5 so the identical expression runs in SQL —
+  the sync query filters to owned partitions in the database), and assigns
+  partition `p` to the instance at
   sorted index `i` when `p % instanceCount == i`. On membership change it computes a
   `PartitionDelta{Gained, Lost}` and the scheduler starts/stops jobs accordingly.
-- **`statestore.SQLiteStore`** persists last‑known monitor status and the instance's
-  owned partitions so a restart recovers without re‑alerting.
+- Alert state lives in the open‑incident row in Postgres (see `incidents.go`),
+  so a restart or partition handoff recovers without re‑alerting.
 
 This gives roughly even monitor distribution and automatic rebalancing on
 scale up/down, with no monitor checked by two instances at once.
@@ -375,8 +377,7 @@ All config is loaded from environment variables in `internal/config/config.go`
 | `ETCD_ENDPOINT` | `http://localhost:2379` | etcd endpoint (distributed scheduler) |
 | `ETCD_USERNAME` / `ETCD_PASSWORD` | — | etcd auth |
 | `SCHEDULER_INSTANCE_ID` | `scheduler-0` | Unique instance id |
-| `SCHEDULER_PARTITION_COUNT` | `1` (Docker default `64`) | Number of partitions |
-| `SCHEDULER_SQLITE_PATH` | `/tmp/upguardly-scheduler.db` | Local state store path |
+| `SCHEDULER_PARTITION_COUNT` | `64` | Number of partitions |
 | `SCHEDULER_LEASE_TTL_SECONDS` | `30` | etcd lease TTL |
 | `SCHEDULER_SYNC_INTERVAL_SECONDS` | `10` | Monitor resync cadence |
 
@@ -422,7 +423,7 @@ there are unit tests for monitors, alerts, health, and the domain models.
 ## Docker & deployment
 
 - **`Dockerfile`** is multi‑stage: a `dev` stage (`go run` with live Prisma generate),
-  a CGO `builder` (SQLite needs CGO) producing `server`, `scheduler` and a bundled
+  a static (CGO‑free) `builder` producing `server`, `scheduler` and a bundled
   `prisma-cli`, and a slim `alpine` production stage running as a non‑root user.
   `entrypoint.sh` runs `prisma migrate deploy` before exec'ing the binary. The Prisma
   query‑engine cache is baked into the image (`XDG_CACHE_HOME=/tmp`) so the container

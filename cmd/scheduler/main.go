@@ -15,7 +15,6 @@ import (
 	"upguardly-backend/internal/coordination"
 	"upguardly-backend/internal/database"
 	"upguardly-backend/internal/scheduler"
-	"upguardly-backend/internal/statestore"
 )
 
 func main() {
@@ -35,13 +34,6 @@ func main() {
 	}
 	defer db.Disconnect()
 	log.Println("Connected to PostgreSQL database")
-
-	stateStore, err := statestore.NewSQLiteStore(cfg.Scheduler.SQLitePath)
-	if err != nil {
-		log.Fatalf("Failed to initialize SQLite state store: %v", err)
-	}
-	defer stateStore.Close()
-	log.Printf("Initialized SQLite state store at: %s", cfg.Scheduler.SQLitePath)
 
 	coordinator, err := coordination.NewCoordinator(
 		cfg.Scheduler.Etcd,
@@ -72,7 +64,6 @@ func main() {
 		alertManager,
 		coordinator,
 		partitions,
-		stateStore,
 		cfg.Scheduler.SyncInterval,
 	)
 

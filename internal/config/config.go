@@ -50,7 +50,6 @@ type SchedulerConfig struct {
 	Embedded       bool
 	InstanceID     string
 	PartitionCount int
-	SQLitePath     string
 	LeaseTTL       time.Duration
 	SyncInterval   time.Duration
 	Etcd           EtcdConfig
@@ -133,10 +132,12 @@ func Load() *Config {
 			RequireRedis:  getEnvBool("RATE_LIMIT_REQUIRE_REDIS", false),
 		},
 		Scheduler: SchedulerConfig{
-			Embedded:       getEnvBool("EMBEDDED_SCHEDULER", false),
-			InstanceID:     getEnv("SCHEDULER_INSTANCE_ID", "scheduler-0"),
-			PartitionCount: getEnvInt("SCHEDULER_PARTITION_COUNT", 1),
-			SQLitePath:     getEnv("SCHEDULER_SQLITE_PATH", "/tmp/upguardly-scheduler.db"),
+			Embedded:   getEnvBool("EMBEDDED_SCHEDULER", false),
+			InstanceID: getEnv("SCHEDULER_INSTANCE_ID", "scheduler-0"),
+			// Default matches the production compose file. With a count of 1
+			// only one instance can ever own work, so scaling out adds zero
+			// capacity — keep this well above the expected instance count.
+			PartitionCount: getEnvInt("SCHEDULER_PARTITION_COUNT", 64),
 			LeaseTTL:       time.Duration(getEnvInt("SCHEDULER_LEASE_TTL_SECONDS", 30)) * time.Second,
 			SyncInterval:   time.Duration(getEnvInt("SCHEDULER_SYNC_INTERVAL_SECONDS", 10)) * time.Second,
 			Etcd: EtcdConfig{

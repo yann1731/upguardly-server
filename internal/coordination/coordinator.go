@@ -29,14 +29,15 @@ type MembershipEvent struct {
 type Coordinator struct {
 	client     *clientv3.Client
 	instanceID string
-	leaseID    clientv3.LeaseID
 	leaseTTL   time.Duration
 
 	mu        sync.RWMutex
+	leaseID   clientv3.LeaseID
 	instances []string
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	doneCh   chan struct{}
 }
 
 func NewCoordinator(cfg config.EtcdConfig, instanceID string, leaseTTL time.Duration) (*Coordinator, error) {
@@ -61,6 +62,20 @@ func NewCoordinator(cfg config.EtcdConfig, instanceID string, leaseTTL time.Dura
 }
 
 func (c *Coordinator) Register(ctx context.Context) error {
+	if err := c.registerLease(ctx); err != nil {
+		return err
+	}
+
+	go c.keepAliveLoop()
+
+	log.Printf("Registered instance %s with etcd (lease TTL: %v)", c.instanceID, c.leaseTTL)
+	return nil
+}
+
+// registerLease grants a fresh lease and writes the instance key under it. It
+// does not spawn any goroutines, so it is safe to call again from the
+// keepalive loop when the previous lease expires.
+func (c *Coordinator) registerLease(ctx context.Context) error {
 	ttlSeconds := int64(c.leaseTTL.Seconds())
 	if ttlSeconds < 5 {
 		ttlSeconds = 5
@@ -70,7 +85,6 @@ func (c *Coordinator) Register(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create lease: %w", err)
 	}
-	c.leaseID = leaseResp.ID
 
 	metadata := InstanceMetadata{
 		InstanceID: c.instanceID,
@@ -82,49 +96,102 @@ func (c *Coordinator) Register(ctx context.Context) error {
 	}
 
 	key := instanceKeyPrefix + c.instanceID
-	_, err = c.client.Put(ctx, key, string(metadataJSON), clientv3.WithLease(c.leaseID))
+	_, err = c.client.Put(ctx, key, string(metadataJSON), clientv3.WithLease(leaseResp.ID))
 	if err != nil {
 		return fmt.Errorf("failed to register instance: %w", err)
 	}
 
-	go c.keepAlive()
+	c.mu.Lock()
+	c.leaseID = leaseResp.ID
+	c.mu.Unlock()
 
-	log.Printf("Registered instance %s with etcd (lease TTL: %v)", c.instanceID, c.leaseTTL)
 	return nil
 }
 
-func (c *Coordinator) keepAlive() {
+func (c *Coordinator) currentLeaseID() clientv3.LeaseID {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.leaseID
+}
+
+// keepAliveLoop keeps the instance lease alive for the lifetime of the
+// coordinator. When the keepalive stream dies (etcd restart, network
+// partition, lease expiry) it re-registers with backoff and resumes, rather
+// than giving up and leaving the process running but invisible to the
+// cluster. It is the only goroutine that closes doneCh.
+func (c *Coordinator) keepAliveLoop() {
 	defer close(c.doneCh)
 
-	keepAliveCh, err := c.client.KeepAlive(context.Background(), c.leaseID)
-	if err != nil {
-		log.Printf("Failed to start lease keepalive: %v", err)
-		return
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-c.stopCh
+		cancel()
+	}()
 
 	for {
+		keepAliveCh, err := c.client.KeepAlive(ctx, c.currentLeaseID())
+		if err != nil {
+			log.Printf("Failed to start lease keepalive: %v", err)
+		} else {
+			c.drainKeepAlive(ctx, keepAliveCh)
+		}
+
 		select {
 		case <-c.stopCh:
 			return
-		case resp, ok := <-keepAliveCh:
+		default:
+		}
+
+		log.Printf("Lease keepalive lost, re-registering instance %s", c.instanceID)
+		if !c.reregisterWithBackoff(ctx) {
+			return
+		}
+	}
+}
+
+// drainKeepAlive consumes keepalive responses until the stream closes or the
+// coordinator stops.
+func (c *Coordinator) drainKeepAlive(ctx context.Context, ch <-chan *clientv3.LeaseKeepAliveResponse) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ch:
 			if !ok {
-				log.Printf("Lease keepalive channel closed, attempting to re-register")
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := c.Register(ctx); err != nil {
-					log.Printf("Failed to re-register: %v", err)
-				}
-				cancel()
 				return
-			}
-			if resp == nil {
-				continue
 			}
 		}
 	}
 }
 
+// reregisterWithBackoff retries registerLease until it succeeds or the
+// coordinator stops. Returns false when stopped.
+func (c *Coordinator) reregisterWithBackoff(ctx context.Context) bool {
+	backoff := time.Second
+	for {
+		regCtx, regCancel := context.WithTimeout(ctx, 5*time.Second)
+		err := c.registerLease(regCtx)
+		regCancel()
+		if err == nil {
+			log.Printf("Re-registered instance %s with a new lease", c.instanceID)
+			return true
+		}
+
+		log.Printf("Failed to re-register instance %s (retrying in %v): %v", c.instanceID, backoff, err)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 func (c *Coordinator) Deregister(ctx context.Context) error {
-	close(c.stopCh)
+	c.stopOnce.Do(func() { close(c.stopCh) })
 
 	select {
 	case <-c.doneCh:
@@ -138,8 +205,8 @@ func (c *Coordinator) Deregister(ctx context.Context) error {
 		return fmt.Errorf("failed to delete instance key: %w", err)
 	}
 
-	if c.leaseID != 0 {
-		_, err = c.client.Revoke(ctx, c.leaseID)
+	if leaseID := c.currentLeaseID(); leaseID != 0 {
+		_, err = c.client.Revoke(ctx, leaseID)
 		if err != nil {
 			log.Printf("Failed to revoke lease: %v", err)
 		}
@@ -149,7 +216,7 @@ func (c *Coordinator) Deregister(ctx context.Context) error {
 	return nil
 }
 
-func (c *Coordinator) WatchInstances(ctx context.Context, eventCh chan<- MembershipEvent) error {
+func (c *Coordinator) WatchInstances(ctx context.Context, eventCh chan MembershipEvent) error {
 	if err := c.refreshInstances(ctx); err != nil {
 		return fmt.Errorf("failed to get initial instances: %w", err)
 	}
@@ -186,7 +253,7 @@ func (c *Coordinator) refreshInstances(ctx context.Context) error {
 	return nil
 }
 
-func (c *Coordinator) watchLoop(ctx context.Context, eventCh chan<- MembershipEvent) {
+func (c *Coordinator) watchLoop(ctx context.Context, eventCh chan MembershipEvent) {
 	watchCh := c.client.Watch(ctx, instanceKeyPrefix, clientv3.WithPrefix())
 
 	for {
@@ -195,8 +262,18 @@ func (c *Coordinator) watchLoop(ctx context.Context, eventCh chan<- MembershipEv
 			return
 		case resp, ok := <-watchCh:
 			if !ok {
+				if ctx.Err() != nil {
+					return
+				}
+				// Any membership change that happened while the watch was
+				// down was never delivered, so re-list before resuming.
 				log.Printf("Watch channel closed, restarting watch")
 				watchCh = c.client.Watch(ctx, instanceKeyPrefix, clientv3.WithPrefix())
+				if err := c.refreshInstances(ctx); err != nil {
+					log.Printf("Failed to refresh instances after watch restart: %v", err)
+					continue
+				}
+				c.notify(eventCh)
 				continue
 			}
 
@@ -216,15 +293,43 @@ func (c *Coordinator) watchLoop(ctx context.Context, eventCh chan<- MembershipEv
 					log.Printf("Failed to refresh instances: %v", err)
 					continue
 				}
-
-				select {
-				case eventCh <- MembershipEvent{Instances: c.GetInstances()}:
-				default:
-					log.Printf("Event channel full, dropping membership event")
-				}
+				c.notify(eventCh)
 			}
 		}
 	}
+}
+
+// notify delivers the current membership to eventCh. Every event carries the
+// full instance list, so when the channel is full the oldest pending event is
+// discarded in favor of the newest — the consumer always converges on the
+// latest membership instead of silently operating on a stale view.
+func (c *Coordinator) notify(eventCh chan MembershipEvent) {
+	ev := MembershipEvent{Instances: c.GetInstances()}
+	for {
+		select {
+		case eventCh <- ev:
+			return
+		default:
+			select {
+			case <-eventCh:
+			default:
+			}
+		}
+	}
+}
+
+// Reconcile re-lists instances from etcd and returns the fresh membership.
+// Callers use it as a periodic backstop so that a missed watch event can never
+// leave partition ownership stale for longer than one reconcile interval.
+func (c *Coordinator) Reconcile(ctx context.Context) ([]string, error) {
+	if err := c.refreshInstances(ctx); err != nil {
+		return nil, err
+	}
+	return c.GetInstances(), nil
+}
+
+func (c *Coordinator) InstanceID() string {
+	return c.instanceID
 }
 
 func (c *Coordinator) GetInstances() []string {
@@ -234,24 +339,6 @@ func (c *Coordinator) GetInstances() []string {
 	result := make([]string, len(c.instances))
 	copy(result, c.instances)
 	return result
-}
-
-func (c *Coordinator) GetInstanceIndex() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	for i, id := range c.instances {
-		if id == c.instanceID {
-			return i
-		}
-	}
-	return -1
-}
-
-func (c *Coordinator) GetInstanceCount() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.instances)
 }
 
 func (c *Coordinator) Close() error {

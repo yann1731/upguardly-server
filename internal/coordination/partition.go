@@ -1,7 +1,9 @@
 package coordination
 
 import (
-	"hash/crc32"
+	"crypto/md5"
+	"encoding/binary"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -22,6 +24,9 @@ type PartitionDelta struct {
 }
 
 func NewPartitionManager(partitionCount int, instanceID string) *PartitionManager {
+	if partitionCount < 1 {
+		partitionCount = 1
+	}
 	return &PartitionManager{
 		partitionCount:  partitionCount,
 		instanceID:      instanceID,
@@ -31,9 +36,26 @@ func NewPartitionManager(partitionCount int, instanceID string) *PartitionManage
 	}
 }
 
+// CalculatePartition maps a monitor ID to a partition. The hash is md5 (not
+// crc32) so Postgres can compute the identical value in SQL — see
+// PartitionSQLExpr — letting the scheduler's sync query filter monitors to
+// owned partitions in the database instead of fetching every row on every
+// instance. Keep both implementations in lockstep.
 func (pm *PartitionManager) CalculatePartition(monitorID string) int {
-	hash := crc32.ChecksumIEEE([]byte(monitorID))
-	return int(hash) % pm.partitionCount
+	sum := md5.Sum([]byte(monitorID))
+	// Signed 32-bit value from the first 4 bytes, matching Postgres'
+	// ('x' || substr(md5(id), 1, 8))::bit(32)::int.
+	v := int32(binary.BigEndian.Uint32(sum[:4]))
+	count := int32(pm.partitionCount)
+	return int((v%count + count) % count)
+}
+
+// PartitionSQLExpr returns a Postgres expression computing the same partition
+// as CalculatePartition for the `id` column. Both languages truncate integer
+// division toward zero, so the double-modulo normalizes negatives the same way.
+func (pm *PartitionManager) PartitionSQLExpr() string {
+	c := pm.partitionCount
+	return fmt.Sprintf("((('x' || substr(md5(id), 1, 8))::bit(32)::int %% %d + %d) %% %d)", c, c, c)
 }
 
 func (pm *PartitionManager) RecalculateOwnership(instances []string) PartitionDelta {

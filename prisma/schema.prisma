@@ -157,8 +157,37 @@ model Alert {
   createdAt DateTime     @default(now()) @map("created_at")
 
   history AlertHistory[]
+  outbox  AlertOutbox[]
 
   @@map("alerts")
+}
+
+// Pending alert deliveries (transactional-outbox pattern). The scheduler
+// enqueues a row per alert config when an incident transition happens; a
+// dispatcher drains due rows with FOR UPDATE SKIP LOCKED (safe with many
+// scheduler instances), retries with exponential backoff, and deletes the row
+// on success or after max attempts. Monitor fields are denormalized so the
+// dispatcher sends exactly what was true at enqueue time, with no joins.
+model AlertOutbox {
+  id            String      @id @default(cuid())
+  alertId       String      @map("alert_id")
+  alert         Alert       @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  monitorId     String      @map("monitor_id")
+  channel       AlertChannel
+  target        String
+  status        Status
+  message       String
+  statusCode    Int?        @map("status_code")
+  latency       Int         @default(0)
+  monitorName   String      @map("monitor_name")
+  monitorType   MonitorType @map("monitor_type")
+  monitorTarget String      @map("monitor_target")
+  attempts      Int         @default(0)
+  nextAttemptAt DateTime    @default(now()) @map("next_attempt_at")
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  @@index([nextAttemptAt])
+  @@map("alert_outbox")
 }
 
 // Partitioned by sent_at (Postgres RANGE); composite PK (id, sent_at) for the

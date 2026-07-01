@@ -9,25 +9,34 @@ import (
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/database"
 	db "upguardly-backend/internal/database/prisma"
-	"upguardly-backend/internal/metrics"
-	"upguardly-backend/internal/models"
-	"upguardly-backend/internal/monitor"
 )
 
-type Scheduler struct {
-	db           *database.Client
-	alertManager *alerter.Manager
-	jobs         map[string]context.CancelFunc
-	mu           sync.RWMutex
-	lastStatus   map[string]models.Status
+// job tracks one running monitor goroutine. updatedAt is the monitor's
+// updated_at at the time the job was started: when it changes, the scheduler
+// restarts the job so interval/target/timeout edits take effect without any
+// per-tick config reads.
+type job struct {
+	cancel    context.CancelFunc
+	updatedAt time.Time
 }
 
-func NewScheduler(db *database.Client, alertManager *alerter.Manager) *Scheduler {
+// Scheduler is the embedded single-process scheduler used by cmd/server for
+// one-box deployments. It checks every enabled monitor in-process.
+type Scheduler struct {
+	db       *database.Client
+	runner   *checkRunner
+	jobs     map[string]*job
+	mu       sync.RWMutex
+	stopCh   chan struct{}
+	stopOnce sync.Once
+}
+
+func NewScheduler(dbc *database.Client, alertManager *alerter.Manager) *Scheduler {
 	return &Scheduler{
-		db:           db,
-		alertManager: alertManager,
-		jobs:         make(map[string]context.CancelFunc),
-		lastStatus:   make(map[string]models.Status),
+		db:     dbc,
+		runner: newCheckRunner(dbc, alertManager),
+		jobs:   make(map[string]*job),
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -45,6 +54,8 @@ func (s *Scheduler) syncLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-s.stopCh:
 			return
 		case <-ticker.C:
 			s.syncMonitors(ctx)
@@ -66,163 +77,61 @@ func (s *Scheduler) syncMonitors(ctx context.Context) {
 
 	for _, m := range monitors {
 		activeIDs[m.ID] = true
-
-		s.mu.RLock()
-		_, exists := s.jobs[m.ID]
-		s.mu.RUnlock()
-
-		if !exists {
-			s.startMonitorJob(ctx, &m)
-		}
+		s.reconcileJob(ctx, &m)
 	}
 
 	s.mu.Lock()
-	for id, cancel := range s.jobs {
+	for id, j := range s.jobs {
 		if !activeIDs[id] {
-			cancel()
+			j.cancel()
 			delete(s.jobs, id)
-			delete(s.lastStatus, id)
 		}
 	}
 	s.mu.Unlock()
+}
+
+// reconcileJob ensures a job is running for m with its current config,
+// restarting it when the monitor row changed since the job started.
+func (s *Scheduler) reconcileJob(ctx context.Context, m *db.MonitorModel) {
+	s.mu.RLock()
+	j, exists := s.jobs[m.ID]
+	s.mu.RUnlock()
+
+	if exists {
+		if j.updatedAt.Equal(m.UpdatedAt) {
+			return
+		}
+		j.cancel()
+		log.Printf("Monitor %s config changed, restarting job", m.ID)
+	}
+
+	s.startMonitorJob(ctx, m)
 }
 
 func (s *Scheduler) startMonitorJob(parentCtx context.Context, m *db.MonitorModel) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s.mu.Lock()
-	s.jobs[m.ID] = cancel
+	s.jobs[m.ID] = &job{cancel: cancel, updatedAt: m.UpdatedAt}
 	s.mu.Unlock()
 
-	go func() {
-		ticker := time.NewTicker(time.Duration(m.Interval) * time.Second)
-		defer ticker.Stop()
-
-		s.runCheck(ctx, m)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				freshMonitor, err := s.db.Prisma.Monitor.FindUnique(
-					db.Monitor.ID.Equals(m.ID),
-				).Exec(ctx)
-				if err != nil {
-					continue
-				}
-				s.runCheck(ctx, freshMonitor)
-			}
-		}
-	}()
+	go s.runner.jobLoop(ctx, m)
 
 	log.Printf("Started monitoring job for %s (%s)", m.Name, m.ID)
 }
 
-func (s *Scheduler) runCheck(ctx context.Context, m *db.MonitorModel) {
-	checker := monitor.NewChecker(models.MonitorType(m.Type))
-	if checker == nil {
-		log.Printf("Unknown monitor type: %s", m.Type)
-		return
-	}
-
-	timeout := time.Duration(m.Timeout) * time.Second
-	result := checker.Check(ctx, m.Target, timeout)
-
-	metrics.MonitorChecksTotal.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status)).Inc()
-	metrics.MonitorCheckLatencyMs.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status)).Observe(float64(result.Latency))
-	metrics.MonitorStatus.WithLabelValues(m.ID, m.Name, string(m.Type)).Set(metrics.StatusToGaugeValue(result.Status))
-
-	s.saveResult(ctx, m.ID, &result)
-	recordIncident(ctx, s.db, m.ID, &result)
-
-	s.mu.RLock()
-	lastStatus, hasLast := s.lastStatus[m.ID]
-	s.mu.RUnlock()
-
-	if !hasLast || lastStatus != result.Status {
-		s.mu.Lock()
-		s.lastStatus[m.ID] = result.Status
-		s.mu.Unlock()
-
-		if hasLast {
-			s.sendAlerts(ctx, m, &result)
-		}
-	}
-
-	log.Printf("Monitor %s: %s (latency: %dms)", m.Name, result.Status, result.Latency)
-}
-
-func (s *Scheduler) saveResult(ctx context.Context, monitorID string, result *models.CheckResult) {
-	var optionalParams []db.MonitorResultSetParam
-
-	optionalParams = append(optionalParams, db.MonitorResult.Message.Set(result.Message))
-
-	if result.StatusCode != nil {
-		optionalParams = append(optionalParams, db.MonitorResult.StatusCode.Set(*result.StatusCode))
-	}
-
-	_, err := s.db.Prisma.MonitorResult.CreateOne(
-		db.MonitorResult.Monitor.Link(db.Monitor.ID.Equals(monitorID)),
-		db.MonitorResult.Status.Set(db.Status(result.Status)),
-		db.MonitorResult.Latency.Set(result.Latency),
-		optionalParams...,
-	).Exec(ctx)
-
-	if err != nil {
-		log.Printf("Failed to save monitor result: %v", err)
-	}
-}
-
-func (s *Scheduler) sendAlerts(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) {
-	alerts, err := s.db.Prisma.Alert.FindMany(
-		db.Alert.MonitorID.Equals(m.ID),
-		db.Alert.Enabled.Equals(true),
-	).Exec(ctx)
-
-	if err != nil {
-		log.Printf("Failed to fetch alerts: %v", err)
-		return
-	}
-
-	mon := &models.Monitor{
-		ID:     m.ID,
-		Name:   m.Name,
-		Type:   models.MonitorType(m.Type),
-		Target: m.Target,
-	}
-
-	for _, alert := range alerts {
-		err := s.alertManager.Send(ctx, models.AlertChannel(alert.Channel), alert.Target, mon, result)
-		if err != nil {
-			log.Printf("Failed to send %s alert: %v", alert.Channel, err)
-		} else {
-			log.Printf("Sent %s alert for %s", alert.Channel, m.Name)
-			metrics.AlertsSentTotal.WithLabelValues(m.ID, m.Name, string(alert.Channel), string(result.Status)).Inc()
-		}
-
-		s.saveAlertHistory(ctx, alert.ID, result)
-	}
-}
-
-func (s *Scheduler) saveAlertHistory(ctx context.Context, alertID string, result *models.CheckResult) {
-	_, err := s.db.Prisma.AlertHistory.CreateOne(
-		db.AlertHistory.Alert.Link(db.Alert.ID.Equals(alertID)),
-		db.AlertHistory.Status.Set(db.Status(result.Status)),
-		db.AlertHistory.Message.Set(result.Message),
-	).Exec(ctx)
-
-	if err != nil {
-		log.Printf("Failed to save alert history: %v", err)
-	}
-}
-
 func (s *Scheduler) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Stop the sync loop first so it cannot recreate jobs after they are
+	// canceled below (Stop must work even if the Start context is not
+	// canceled by the caller).
+	s.stopOnce.Do(func() { close(s.stopCh) })
 
-	for id, cancel := range s.jobs {
-		cancel()
+	s.mu.Lock()
+	for id, j := range s.jobs {
+		j.cancel()
 		delete(s.jobs, id)
 	}
+	s.mu.Unlock()
+
+	s.runner.stop()
 }

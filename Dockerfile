@@ -16,8 +16,6 @@ CMD ["go", "run", "./cmd/server"]
 FROM golang:1.25-alpine AS builder
 WORKDIR /app
 
-RUN apk add --no-cache gcc musl-dev
-
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -25,8 +23,8 @@ COPY . .
 
 RUN go run github.com/steebchen/prisma-client-go generate
 
-RUN CGO_ENABLED=1 go build -o server ./cmd/server
-RUN CGO_ENABLED=1 go build -o scheduler ./cmd/scheduler
+RUN CGO_ENABLED=0 go build -o server ./cmd/server
+RUN CGO_ENABLED=0 go build -o scheduler ./cmd/scheduler
 RUN go build -o prisma-cli github.com/steebchen/prisma-client-go
 
 # Stage 2: Production
@@ -46,24 +44,16 @@ COPY prisma/migrations ./prisma/migrations
 COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-# Create the scheduler's data dir owned by appuser. A fresh named volume mounted
-# here inherits this ownership, so the non-root user can create scheduler.db.
-RUN mkdir -p /app/data && chown -R appuser:appgroup /app /tmp/prisma
+RUN chown -R appuser:appgroup /app /tmp/prisma
 
 USER appuser
 
 EXPOSE 8080
 
-# Server configuration
+# Server configuration. Scheduler configuration (SCHEDULER_*, ETCD_ENDPOINT)
+# comes from the environment — see internal/config/config.go for names and
+# defaults.
 ENV PORT=8080
-
-# Scheduler configuration
-ENV SCHEDULER_INSTANCE_ID=""
-ENV SCHEDULER_PARTITION_COUNT=64
-ENV SCHEDULER_SYNC_INTERVAL=10s
-ENV SCHEDULER_LEASE_TTL=10s
-ENV SQLITE_PATH=/app/data/scheduler.db
-ENV ETCD_ENDPOINTS=localhost:2379
 
 # Point prisma-client-go's cache (os.UserCacheDir -> $XDG_CACHE_HOME/prisma) at
 # the binaries bundled at build time under /tmp/prisma. Without this it resolves
