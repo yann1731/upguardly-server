@@ -76,8 +76,18 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		return
 	}
 
-	// Enforce the resolved plan's minimum check interval.
-	if req.Interval < limits.MinInterval {
+	// Default an unspecified interval to the plan's minimum, and enforce that
+	// minimum on explicit values. Validate() skipped the interval checks for
+	// the "not provided" case, so re-check timeout against the default here.
+	if req.Interval == 0 {
+		req.Interval = limits.MinInterval
+		if req.Timeout >= req.Interval {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("timeout (%ds) must be less than interval (%ds)", req.Timeout, req.Interval),
+			})
+			return
+		}
+	} else if req.Interval < limits.MinInterval {
 		c.JSON(http.StatusPaymentRequired, gin.H{
 			"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", limits.MinInterval),
 		})

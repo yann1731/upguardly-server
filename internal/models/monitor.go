@@ -57,10 +57,11 @@ type UpdateMonitorRequest struct {
 	Enabled  *bool        `json:"enabled"`
 }
 
+// SetDefaults fills plan-independent defaults. Interval is deliberately left
+// at 0 ("not provided"): its default is the plan's minimum interval, which the
+// handler applies after resolving the plan — a flat default like 60 would be
+// rejected outright on plans whose minimum is higher (FREE requires 300).
 func (r *CreateMonitorRequest) SetDefaults() {
-	if r.Interval == 0 {
-		r.Interval = 60
-	}
 	if r.Timeout == 0 {
 		r.Timeout = 30
 	}
@@ -70,7 +71,9 @@ func (r *CreateMonitorRequest) SetDefaults() {
 	}
 }
 
-// Validate checks field lengths and interval/timeout bounds.
+// Validate checks field lengths and interval/timeout bounds. Interval 0 means
+// "not provided" and is skipped here: the handler defaults it to the plan's
+// minimum (and re-checks timeout against it) after resolving the plan.
 func (r *CreateMonitorRequest) Validate() error {
 	if len(r.Name) > MonitorNameMaxLen {
 		return fmt.Errorf("name must not exceed %d characters", MonitorNameMaxLen)
@@ -78,13 +81,13 @@ func (r *CreateMonitorRequest) Validate() error {
 	if len(r.Target) > MonitorTargetMaxLen {
 		return fmt.Errorf("target must not exceed %d characters", MonitorTargetMaxLen)
 	}
-	if r.Interval < MonitorIntervalMin || r.Interval > MonitorIntervalMax {
+	if r.Interval != 0 && (r.Interval < MonitorIntervalMin || r.Interval > MonitorIntervalMax) {
 		return fmt.Errorf("interval must be between %d and %d seconds", MonitorIntervalMin, MonitorIntervalMax)
 	}
 	if r.Timeout < MonitorTimeoutMin || r.Timeout > MonitorTimeoutMax {
 		return fmt.Errorf("timeout must be between %d and %d seconds", MonitorTimeoutMin, MonitorTimeoutMax)
 	}
-	if r.Timeout >= r.Interval {
+	if r.Interval != 0 && r.Timeout >= r.Interval {
 		return fmt.Errorf("timeout (%ds) must be less than interval (%ds)", r.Timeout, r.Interval)
 	}
 	return nil

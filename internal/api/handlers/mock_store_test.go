@@ -52,12 +52,14 @@ type mockStore struct {
 	deleteOrgErr     error
 
 	// captured call args
-	lastLimit       int
-	lastUpsertSub   *models.UpsertSubscriptionParams
-	deleteOrgCalled bool
+	lastLimit          int
+	lastUpsertSub      *models.UpsertSubscriptionParams
+	deleteOrgCalled    bool
+	lastCreateInterval int
 }
 
-func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, _, _ int, _ bool) (*models.Monitor, error) {
+func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval, _ int, _ bool) (*models.Monitor, error) {
+	m.lastCreateInterval = interval
 	return m.monitorResult, m.monitorErr
 }
 func (m *mockStore) CountMonitorsByOrg(_ context.Context, _ string) (int, error) {

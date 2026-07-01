@@ -17,7 +17,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"My Monitor","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"My Monitor","type":"HTTP","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
 		var got models.Monitor
@@ -30,7 +30,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","type":"HTTP","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
@@ -41,7 +41,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
 	})
@@ -51,7 +51,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"INVALID","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"INVALID","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
@@ -61,7 +61,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
@@ -72,7 +72,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
@@ -90,9 +90,43 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"https://example.com"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
+	})
+
+	t.Run("unspecified interval defaults to the plan minimum (FREE=300)", func(t *testing.T) {
+		// A FREE user creating a monitor without an interval must get the
+		// plan's minimum, not a flat 60 that the plan check would reject.
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, 300, store.lastCreateInterval)
+	})
+
+	t.Run("unspecified interval defaults to the plan minimum (PRO=60)", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, 60, store.lastCreateInterval)
+	})
+
+	t.Run("explicit interval below the plan minimum returns 402", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor()} // FREE: minimum 300
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","interval":60}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
 }
 
