@@ -151,17 +151,20 @@ func TestResultWriterBatchFlush(t *testing.T) {
 }
 
 // Covers the raw multi-row INSERT edges the happy path misses: a nil
-// status code must land as NULL, and a row whose monitor no longer exists
-// must be skipped without failing the rest of the batch.
+// status code must land as NULL, a row whose monitor no longer exists
+// must be skipped without failing the rest of the batch, and a message
+// with SQL metacharacters must land verbatim (message text can come from
+// the monitored target, so it is attacker-influenced).
 func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rwx-%d", time.Now().UnixNano()))
 
+	hostile := `', 0, NULL, ''); DROP TABLE monitor_results; --`
 	w := newResultWriter(dbc)
 	defer w.stop()
 	w.flush([]pendingResult{
-		{monitorID: m.ID, result: models.CheckResult{Status: models.StatusUP, Latency: 12, Message: "OK"}},
+		{monitorID: m.ID, result: models.CheckResult{Status: models.StatusUP, Latency: 12, Message: hostile}},
 		{monitorID: "no-such-monitor", result: models.CheckResult{Status: models.StatusUP, Latency: 1}},
 	})
 
@@ -179,6 +182,9 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	}
 	if rows[0].Status != db.StatusUp {
 		t.Fatalf("status = %s, want UP", rows[0].Status)
+	}
+	if msg, ok := rows[0].Message(); !ok || msg != hostile {
+		t.Fatalf("message = %q/%v, want the raw payload stored verbatim", msg, ok)
 	}
 }
 
