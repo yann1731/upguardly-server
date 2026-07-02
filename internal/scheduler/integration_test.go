@@ -191,16 +191,35 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 func TestOutboxEnqueueAndClaim(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
-	m := createTestMonitor(t, dbc, fmt.Sprintf("ob-%d", time.Now().UnixNano()))
 
-	alertCfg, err := dbc.Prisma.Alert.CreateOne(
-		db.Alert.Monitor.Link(db.Monitor.ID.Equals(m.ID)),
-		db.Alert.Channel.Set(db.AlertChannelEmail),
-		db.Alert.Target.Set("it@example.com"),
+	// A unique owner per run: channels are per-user, so reusing "it-user"
+	// would leak channels between runs.
+	owner := fmt.Sprintf("it-user-ob-%d", time.Now().UnixNano())
+	m, err := dbc.Prisma.Monitor.CreateOne(
+		db.Monitor.UserID.Set(owner),
+		db.Monitor.Name.Set("it-monitor-ob"),
+		db.Monitor.Type.Set(db.MonitorTypeHTTP),
+		db.Monitor.Target.Set("https://example.com"),
 	).Exec(ctx)
 	if err != nil {
-		t.Fatalf("create alert: %v", err)
+		t.Fatalf("create monitor: %v", err)
 	}
+	t.Cleanup(func() {
+		_, _ = dbc.Prisma.Monitor.FindUnique(db.Monitor.ID.Equals(m.ID)).Delete().Exec(ctx)
+	})
+
+	alertCfg, err := dbc.Prisma.NotificationChannel.CreateOne(
+		db.NotificationChannel.UserID.Set(owner),
+		db.NotificationChannel.Channel.Set(db.AlertChannelEmail),
+		db.NotificationChannel.Target.Set("it@example.com"),
+		db.NotificationChannel.Enabled.Set(true),
+	).Exec(ctx)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = dbc.Prisma.NotificationChannel.FindUnique(db.NotificationChannel.ID.Equals(alertCfg.ID)).Delete().Exec(ctx)
+	})
 
 	// Enqueue through the runner path (without starting a dispatcher, so the
 	// rows stay claimable by this test).
@@ -222,7 +241,7 @@ func TestOutboxEnqueueAndClaim(t *testing.T) {
 
 	var row *outboxRow
 	for i := range rows {
-		if rows[i].AlertID != nil && string(*rows[i].AlertID) == alertCfg.ID {
+		if rows[i].NotificationChannelID != nil && string(*rows[i].NotificationChannelID) == alertCfg.ID {
 			row = &rows[i]
 		}
 	}
@@ -260,7 +279,7 @@ func TestOutboxEnqueueAndClaim(t *testing.T) {
 	d.finalize(ctx, row, "delivered")
 
 	left, err := dbc.Prisma.AlertOutbox.FindMany(
-		db.AlertOutbox.AlertID.Equals(alertCfg.ID),
+		db.AlertOutbox.NotificationChannelID.Equals(alertCfg.ID),
 	).Exec(ctx)
 	if err != nil {
 		t.Fatalf("list outbox: %v", err)
@@ -270,7 +289,7 @@ func TestOutboxEnqueueAndClaim(t *testing.T) {
 	}
 
 	hist, err := dbc.Prisma.AlertHistory.FindMany(
-		db.AlertHistory.AlertID.Equals(alertCfg.ID),
+		db.AlertHistory.NotificationChannelID.Equals(alertCfg.ID),
 	).Exec(ctx)
 	if err != nil {
 		t.Fatalf("list history: %v", err)
@@ -283,11 +302,9 @@ func TestOutboxEnqueueAndClaim(t *testing.T) {
 	}
 }
 
-// Covers the global notification-channel enqueue path: a monitor with no
-// per-monitor alerts inherits the owner's channels, a per-monitor override
-// opts one channel out, a per-monitor alert with the same (channel, target)
-// suppresses the duplicate global send, and finalize links history to the
-// channel instead of an alert.
+// Covers the global notification-channel enqueue path: a monitor inherits
+// the owner's channels, a per-monitor override opts one channel out, and
+// finalize links history to the channel.
 func TestOutboxGlobalChannels(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
@@ -354,27 +371,6 @@ func TestOutboxGlobalChannels(t *testing.T) {
 	}
 	if _, ok := rows[0].AlertID(); ok {
 		t.Fatalf("global-channel row must have NULL alert_id")
-	}
-
-	// A per-monitor alert with the same (channel, target) suppresses the
-	// duplicate global send.
-	if _, err := dbc.Prisma.Alert.CreateOne(
-		db.Alert.Monitor.Link(db.Monitor.ID.Equals(m.ID)),
-		db.Alert.Channel.Set(db.AlertChannelEmail),
-		db.Alert.Target.Set("global@example.com"),
-	).Exec(ctx); err != nil {
-		t.Fatalf("create alert: %v", err)
-	}
-	r.enqueueAlerts(ctx, m, result)
-
-	rows, err = dbc.Prisma.AlertOutbox.FindMany(
-		db.AlertOutbox.MonitorID.Equals(m.ID),
-	).Exec(ctx)
-	if err != nil {
-		t.Fatalf("list outbox after dedupe: %v", err)
-	}
-	if len(rows) != 2 { // first enqueue's row + one deduped alert row
-		t.Fatalf("outbox rows = %d, want 2 (duplicate global send suppressed)", len(rows))
 	}
 
 	// finalize on a global-channel row links history to the channel.

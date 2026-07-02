@@ -30,10 +30,6 @@ type mockStore struct {
 	incidentsErr    error
 	statsResult     *models.MonitorStats
 	statsErr        error
-	alertResult     *models.Alert
-	alertErr        error
-	alertsResult    []models.Alert
-	alertsErr       error
 	deleteErr       error
 
 	// notification channel return values
@@ -64,10 +60,13 @@ type mockStore struct {
 	deleteOrgErr     error
 
 	// captured call args
-	lastLimit          int
-	lastUpsertSub      *models.UpsertSubscriptionParams
-	deleteOrgCalled    bool
-	lastCreateInterval int
+	lastLimit                int
+	lastUpsertSub            *models.UpsertSubscriptionParams
+	deleteOrgCalled          bool
+	lastCreateInterval       int
+	lastChannelCreateChannel string
+	lastChannelCreateTarget  string
+	lastChannelUpdate        *models.UpdateNotificationChannelRequest
 }
 
 func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval, _ int, _ bool) (*models.Monitor, error) {
@@ -103,25 +102,12 @@ func (m *mockStore) ListIncidents(_ context.Context, _, _ string, limit int) ([]
 func (m *mockStore) GetMonitorStats(_ context.Context, _, _ string, _ time.Time) (*models.MonitorStats, error) {
 	return m.statsResult, m.statsErr
 }
-func (m *mockStore) CreateAlert(_ context.Context, _, _, _, _ string, _ bool) (*models.Alert, error) {
-	return m.alertResult, m.alertErr
-}
-func (m *mockStore) ListAlerts(_ context.Context, _, _ string) ([]models.Alert, error) {
-	return m.alertsResult, m.alertsErr
-}
-func (m *mockStore) GetAlert(_ context.Context, _ string) (*models.Alert, error) {
-	return m.alertResult, m.alertErr
-}
-func (m *mockStore) UpdateAlert(_ context.Context, _ string, _ models.UpdateAlertRequest) (*models.Alert, error) {
-	return m.alertResult, m.alertErr
-}
-func (m *mockStore) DeleteAlert(_ context.Context, _ string) error {
-	return m.deleteErr
-}
 
 // ── Notification channel stubs ────────────────────────────────────────────────
 
-func (m *mockStore) CreateNotificationChannel(_ context.Context, _, _, _ string, _ bool) (*models.NotificationChannel, error) {
+func (m *mockStore) CreateNotificationChannel(_ context.Context, _, channel, target string, _ bool) (*models.NotificationChannel, error) {
+	m.lastChannelCreateChannel = channel
+	m.lastChannelCreateTarget = target
 	return m.channelResult, m.channelErr
 }
 func (m *mockStore) ListNotificationChannels(_ context.Context, _ string) ([]models.NotificationChannel, error) {
@@ -133,7 +119,8 @@ func (m *mockStore) CountNotificationChannels(_ context.Context, _ string) (int,
 func (m *mockStore) GetNotificationChannel(_ context.Context, _, _ string) (*models.NotificationChannel, error) {
 	return m.channelResult, m.channelErr
 }
-func (m *mockStore) UpdateNotificationChannel(_ context.Context, _, _ string, _ models.UpdateNotificationChannelRequest) (*models.NotificationChannel, error) {
+func (m *mockStore) UpdateNotificationChannel(_ context.Context, _, _ string, req models.UpdateNotificationChannelRequest) (*models.NotificationChannel, error) {
+	m.lastChannelUpdate = &req
 	return m.channelResult, m.channelErr
 }
 func (m *mockStore) DeleteNotificationChannel(_ context.Context, _, _ string) error {

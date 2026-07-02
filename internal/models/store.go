@@ -25,13 +25,6 @@ type Store interface {
 	ListIncidents(ctx context.Context, monitorId, userId string, limit int) ([]Incident, error)
 	GetMonitorStats(ctx context.Context, monitorId, userId string, since time.Time) (*MonitorStats, error)
 
-	// Alerts
-	CreateAlert(ctx context.Context, monitorId, userId, channel, target string, enabled bool) (*Alert, error)
-	ListAlerts(ctx context.Context, monitorId, userId string) ([]Alert, error)
-	GetAlert(ctx context.Context, id string) (*Alert, error)
-	UpdateAlert(ctx context.Context, id string, req UpdateAlertRequest) (*Alert, error)
-	DeleteAlert(ctx context.Context, id string) error
-
 	// Notification channels (global, per-user) and per-monitor overrides
 	CreateNotificationChannel(ctx context.Context, userId, channel, target string, enabled bool) (*NotificationChannel, error)
 	ListNotificationChannels(ctx context.Context, userId string) ([]NotificationChannel, error)

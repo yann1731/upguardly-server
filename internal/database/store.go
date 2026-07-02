@@ -439,102 +439,6 @@ func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.M
 	return stats
 }
 
-// ── Alert ────────────────────────────────────────────────────────────────────
-
-func (s *PrismaStore) CreateAlert(ctx context.Context, monitorId, userId, channel, target string, enabled bool) (*models.Alert, error) {
-	if _, err := s.client.Prisma.Monitor.FindFirst(
-		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.Or(
-			db.Monitor.UserID.Equals(userId),
-			db.Monitor.Org.Where(
-				db.Organization.Members.Some(
-					db.OrganizationMember.UserID.Equals(userId),
-				),
-			),
-		),
-	).Exec(ctx); err != nil {
-		return nil, models.ErrNotFound
-	}
-
-	a, err := s.client.Prisma.Alert.CreateOne(
-		db.Alert.Monitor.Link(db.Monitor.ID.Equals(monitorId)),
-		db.Alert.Channel.Set(db.AlertChannel(channel)),
-		db.Alert.Target.Set(target),
-		db.Alert.Enabled.Set(enabled),
-	).Exec(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return alertToModel(a), nil
-}
-
-func (s *PrismaStore) ListAlerts(ctx context.Context, monitorId, userId string) ([]models.Alert, error) {
-	if _, err := s.client.Prisma.Monitor.FindFirst(
-		db.Monitor.ID.Equals(monitorId),
-		db.Monitor.Or(
-			db.Monitor.UserID.Equals(userId),
-			db.Monitor.Org.Where(
-				db.Organization.Members.Some(
-					db.OrganizationMember.UserID.Equals(userId),
-				),
-			),
-		),
-	).Exec(ctx); err != nil {
-		return nil, models.ErrNotFound
-	}
-
-	as, err := s.client.Prisma.Alert.FindMany(
-		db.Alert.MonitorID.Equals(monitorId),
-	).Exec(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]models.Alert, len(as))
-	for i := range as {
-		out[i] = *alertToModel(&as[i])
-	}
-	return out, nil
-}
-
-func (s *PrismaStore) GetAlert(ctx context.Context, id string) (*models.Alert, error) {
-	a, err := s.client.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Exec(ctx)
-	if err != nil {
-		return nil, models.ErrNotFound
-	}
-	return alertToModel(a), nil
-}
-
-func (s *PrismaStore) UpdateAlert(ctx context.Context, id string, req models.UpdateAlertRequest) (*models.Alert, error) {
-	var params []db.AlertSetParam
-	if req.Channel != nil {
-		params = append(params, db.Alert.Channel.Set(db.AlertChannel(*req.Channel)))
-	}
-	if req.Target != nil {
-		params = append(params, db.Alert.Target.Set(*req.Target))
-	}
-	if req.Enabled != nil {
-		params = append(params, db.Alert.Enabled.Set(*req.Enabled))
-	}
-
-	a, err := s.client.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Update(params...).Exec(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return alertToModel(a), nil
-}
-
-func (s *PrismaStore) DeleteAlert(ctx context.Context, id string) error {
-	_, err := s.client.Prisma.Alert.FindUnique(
-		db.Alert.ID.Equals(id),
-	).Delete().Exec(ctx)
-	return err
-}
-
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
 func monitorToModel(m *db.MonitorModel) *models.Monitor {
@@ -553,17 +457,6 @@ func monitorToModel(m *db.MonitorModel) *models.Monitor {
 		Enabled:   m.Enabled,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
-	}
-}
-
-func alertToModel(a *db.AlertModel) *models.Alert {
-	return &models.Alert{
-		ID:        a.ID,
-		MonitorID: a.MonitorID,
-		Channel:   models.AlertChannel(a.Channel),
-		Target:    a.Target,
-		Enabled:   a.Enabled,
-		CreatedAt: a.CreatedAt,
 	}
 }
 

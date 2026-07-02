@@ -142,20 +142,10 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 				monitors.GET("/:id/incidents", h.GetMonitorIncidents)
 				monitors.GET("/:id/stats", h.GetMonitorStats)
 
-				monitors.POST("/:id/alerts", middleware.StrictRateLimit(), h.CreateAlert)
-				monitors.GET("/:id/alerts", h.ListAlerts)
-
 				// Per-monitor opt-in/opt-out of the account's global channels.
 				monitors.GET("/:id/channels", h.ListMonitorChannels)
 				monitors.PUT("/:id/channels/:channelId", middleware.StrictRateLimit(), h.SetMonitorChannel)
 				monitors.DELETE("/:id/channels/:channelId", middleware.StrictRateLimit(), h.DeleteMonitorChannel)
-			}
-
-			// Alerts
-			alerts := protected.Group("/alerts")
-			{
-				alerts.PUT("/:id", middleware.StrictRateLimit(), h.UpdateAlert)
-				alerts.DELETE("/:id", h.DeleteAlert)
 			}
 
 			// Global (account-level) notification channels — the settings-page

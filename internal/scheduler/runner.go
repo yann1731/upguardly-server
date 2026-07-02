@@ -113,34 +113,14 @@ func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel, tracker 
 // sending inline. The dispatcher delivers with retries, so a slow or down
 // provider neither blocks the check loop nor loses the alert.
 //
-// Effective channels for a monitor are the union of its own enabled Alert
-// rows and the owner's global notification channels, where a per-monitor
-// MonitorChannelSetting overrides the channel's global enabled flag (absent
-// row = inherit). Global channels that duplicate a per-monitor alert's
-// (channel, target) pair are skipped so nobody is paged twice.
+// The effective channels for a monitor are the owner's global notification
+// channels, where a per-monitor MonitorChannelSetting overrides the channel's
+// global enabled flag (absent row = inherit).
 func (r *checkRunner) enqueueAlerts(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) {
-	alerts, err := r.db.Prisma.Alert.FindMany(
-		db.Alert.MonitorID.Equals(m.ID),
-		db.Alert.Enabled.Equals(true),
-	).Exec(ctx)
+	channels := r.effectiveGlobalChannels(ctx, m)
 
-	if err != nil {
-		log.Printf("Failed to fetch alerts: %v", err)
-		return
-	}
-
-	queries := make([]transaction.Transaction, 0, len(alerts))
-	enqueued := make(map[string]bool, len(alerts))
-	for _, alert := range alerts {
-		enqueued[string(alert.Channel)+"\x00"+alert.Target] = true
-		queries = append(queries, r.outboxCreate(m, result, alert.Channel, alert.Target,
-			db.AlertOutbox.Alert.Link(db.Alert.ID.Equals(alert.ID))).Tx())
-	}
-
-	for _, ch := range r.effectiveGlobalChannels(ctx, m) {
-		if enqueued[string(ch.Channel)+"\x00"+ch.Target] {
-			continue
-		}
+	queries := make([]transaction.Transaction, 0, len(channels))
+	for _, ch := range channels {
 		queries = append(queries, r.outboxCreate(m, result, ch.Channel, ch.Target,
 			db.AlertOutbox.NotificationChannel.Link(db.NotificationChannel.ID.Equals(ch.ID))).Tx())
 	}
@@ -154,8 +134,8 @@ func (r *checkRunner) enqueueAlerts(ctx context.Context, m *db.MonitorModel, res
 	}
 }
 
-// outboxCreate builds one outbox insert; source links the row to its origin —
-// either a per-monitor Alert or a global NotificationChannel.
+// outboxCreate builds one outbox insert; source links the row to the global
+// NotificationChannel it came from.
 func (r *checkRunner) outboxCreate(m *db.MonitorModel, result *models.CheckResult, channel db.AlertChannel, target string, source db.AlertOutboxSetParam) alertOutboxInsert {
 	optionalParams := []db.AlertOutboxSetParam{
 		source,

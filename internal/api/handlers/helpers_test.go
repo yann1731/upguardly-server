@@ -27,10 +27,9 @@ func aMonitor() *models.Monitor {
 	}
 }
 
-func anAlert() *models.Alert {
-	return &models.Alert{
-		ID:        "alert-1",
-		MonitorID: "mon-1",
+func aChannel() *models.NotificationChannel {
+	return &models.NotificationChannel{
+		ID:        "chan-1",
 		Channel:   models.AlertChannelEMAIL,
 		Target:    "user@example.com",
 		Enabled:   true,

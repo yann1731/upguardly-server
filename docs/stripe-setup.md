@@ -27,11 +27,11 @@ price IDs are mode-specific and not interchangeable.
 The app sells two paid plans (FREE is the default and needs no Stripe object). The plan
 limits live in `internal/models/plan.go`:
 
-| Plan | Max monitors | Max alerts / monitor |
+| Plan | Max monitors | Max integrations |
 | --- | --- | --- |
-| FREE | 5 | 1 |
-| PRO | 50 | 10 |
-| ENTERPRISE | unlimited | unlimited |
+| FREE | 5 | 3 |
+| PRO | 20 | 10 |
+| ENTERPRISE | 200 | unlimited |
 
 In the Stripe dashboard → **Product catalog** → **Add product**:
 

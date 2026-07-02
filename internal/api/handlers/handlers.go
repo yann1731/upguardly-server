@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"fmt"
 	"sync"
 	"time"
+
+	"github.com/supertokens/supertokens-golang/recipe/emailpassword"
 
 	"upguardly-backend/internal/mailer"
 	"upguardly-backend/internal/models"
@@ -22,17 +25,37 @@ type Handlers struct {
 	mailer *mailer.Mailer
 	stripe StripeService
 
+	// UserEmailLookup resolves a user's account email. EMAIL notification
+	// channels are pinned to it: the stored target is always the account
+	// email, never a caller-supplied address. Exported so tests can stub the
+	// SuperTokens lookup.
+	UserEmailLookup func(userID string) (string, error)
+
 	reconcileMu sync.Mutex
 	reconciled  map[string]time.Time
 }
 
 func NewHandlers(store models.Store, m *mailer.Mailer, s StripeService) *Handlers {
 	return &Handlers{
-		store:      store,
-		mailer:     m,
-		stripe:     s,
-		reconciled: make(map[string]time.Time),
+		store:           store,
+		mailer:          m,
+		stripe:          s,
+		UserEmailLookup: supertokensUserEmail,
+		reconciled:      make(map[string]time.Time),
 	}
+}
+
+// supertokensUserEmail resolves the account email from the emailpassword
+// recipe — SuperTokens owns the user record, there is no local user table.
+func supertokensUserEmail(userID string) (string, error) {
+	user, err := emailpassword.GetUserByID(userID)
+	if err != nil {
+		return "", err
+	}
+	if user == nil {
+		return "", fmt.Errorf("user %s not found", userID)
+	}
+	return user.Email, nil
 }
 
 // shouldReconcile reports whether the user's subscription is due for a live

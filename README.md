@@ -100,7 +100,7 @@ cmd/
 internal/
   api/
     router.go              # route table, CORS, security headers, metrics endpoint
-    handlers/              # Gin handlers: monitors, alerts, orgs, members,
+    handlers/              # Gin handlers: monitors, integrations, orgs, members,
                            #   invitations, subscriptions, health
     middleware/            # auth, org_auth (RBAC), ratelimit, metrics
   auth/                    # SuperTokens init + session middleware
@@ -178,15 +178,19 @@ Base path: **`/v1`**. JSON in/out. Convention: `api.upguardly.com/v1/{route}`.
 | `PUT` | `/v1/monitors/:id` |
 | `DELETE` | `/v1/monitors/:id` |
 | `GET` | `/v1/monitors/:id/results` (`?limit=` 1‑1000, default 100) |
-| `POST` | `/v1/monitors/:id/alerts` |
-| `GET` | `/v1/monitors/:id/alerts` |
+| `GET` | `/v1/monitors/:id/channels` (integrations merged with this monitor's overrides) |
+| `PUT` | `/v1/monitors/:id/channels/:channelId` (per‑monitor opt‑in/opt‑out override) |
+| `DELETE` | `/v1/monitors/:id/channels/:channelId` (revert to the account‑wide setting) |
 
-**Alerts**
+**Integrations (notification channels)** — account‑level alert destinations
+every monitor inherits; EMAIL targets are pinned server‑side to the account email.
 
 | Method | Path |
 |--------|------|
-| `PUT` | `/v1/alerts/:id` |
-| `DELETE` | `/v1/alerts/:id` |
+| `POST` | `/v1/notification-channels` |
+| `GET` | `/v1/notification-channels` |
+| `PUT` | `/v1/notification-channels/:id` |
+| `DELETE` | `/v1/notification-channels/:id` |
 
 **Invitations**
 

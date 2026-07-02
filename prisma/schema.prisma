@@ -148,6 +148,10 @@ model Incident {
   @@map("incidents")
 }
 
+// RETIRED — per-monitor alerts were folded into NotificationChannel +
+// MonitorChannelSetting (see migration 20260702130000_fold_alerts_into_channels).
+// No code reads or writes this table; it survives only because alert_history
+// audit rows cascade-delete with their alert. Drop both together later.
 model Alert {
   id        String       @id @default(cuid())
   monitorId String       @map("monitor_id")

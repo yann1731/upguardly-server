@@ -29,6 +29,17 @@ func (h *Handlers) CreateNotificationChannel(c *gin.Context) {
 	}
 	req.SetDefaults()
 
+	// Email alerting is pinned to the account email: whatever target the
+	// caller sent is replaced with the channel owner's own address.
+	if req.Channel == models.AlertChannelEMAIL {
+		email, err := h.UserEmailLookup(userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve account email"})
+			return
+		}
+		req.Target = email
+	}
+
 	if err := validateAlertTarget(req.Channel, req.Target); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -106,8 +117,10 @@ func (h *Handlers) UpdateNotificationChannel(c *gin.Context) {
 		return
 	}
 
-	// Same gating policy as UpdateAlert: switching channel is plan-gated,
-	// editing target / toggling enabled on the existing channel is not.
+	// Switching to a different channel counts as configuring it, so it is
+	// plan-gated like create; editing the target or toggling enabled on the
+	// existing channel is not — after a downgrade, users keep control of
+	// channels they configured while entitled.
 	if req.Channel != nil && *req.Channel != channel.Channel {
 		limits := models.LimitsForPlan(h.planForUser(c.Request.Context(), userId))
 		if !limits.ChannelAllowed(*req.Channel) {
@@ -122,6 +135,17 @@ func (h *Handlers) UpdateNotificationChannel(c *gin.Context) {
 		effectiveChannel := channel.Channel
 		if req.Channel != nil {
 			effectiveChannel = *req.Channel
+		}
+		// EMAIL channels stay pinned to the account email regardless of the
+		// requested target (including when switching an existing channel to
+		// EMAIL).
+		if effectiveChannel == models.AlertChannelEMAIL {
+			email, err := h.UserEmailLookup(userId)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve account email"})
+				return
+			}
+			req.Target = &email
 		}
 		effectiveTarget := channel.Target
 		if req.Target != nil {

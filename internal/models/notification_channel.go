@@ -16,8 +16,10 @@ type NotificationChannel struct {
 
 type CreateNotificationChannelRequest struct {
 	Channel AlertChannel `json:"channel" binding:"required,oneof=EMAIL SMS DISCORD SLACK TELEGRAM"`
-	Target  string       `json:"target" binding:"required"`
-	Enabled *bool        `json:"enabled"`
+	// Target is optional for EMAIL — the server pins it to the account email.
+	// Other channels reject an empty target in validateAlertTarget.
+	Target  string `json:"target"`
+	Enabled *bool  `json:"enabled"`
 }
 
 func (r *CreateNotificationChannelRequest) SetDefaults() {
