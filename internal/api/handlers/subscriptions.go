@@ -25,24 +25,31 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 		return
 	}
 
+	// Reconciling against live Stripe state heals records after dropped
+	// webhooks, but it costs a synchronous Stripe round trip — so it runs at
+	// most once per user per reconcileTTL; within the TTL the DB record is
+	// served as-is.
+	reconcile := h.shouldReconcile(userId)
+
 	sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
 	if err != nil {
 		// No DB record. A webhook may have been missed, so try to reconcile
 		// directly from Stripe before falling back to a default free plan.
-		if reconciled := h.reconcileSubscription(c, userId, nil); reconciled != nil {
-			c.JSON(http.StatusOK, reconciled)
-			return
+		if reconcile {
+			if reconciled := h.reconcileSubscription(c, userId, nil); reconciled != nil {
+				c.JSON(http.StatusOK, reconciled)
+				return
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"plan": "FREE", "status": "ACTIVE"})
 		return
 	}
 
-	// Reconcile the stored record against Stripe's live state so the displayed
-	// plan, status and cancellation flag are always accurate even if a webhook
-	// was dropped or arrived in an unparseable API version.
-	if reconciled := h.reconcileSubscription(c, userId, sub); reconciled != nil {
-		c.JSON(http.StatusOK, reconciled)
-		return
+	if reconcile {
+		if reconciled := h.reconcileSubscription(c, userId, sub); reconciled != nil {
+			c.JSON(http.StatusOK, reconciled)
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, sub)
@@ -222,6 +229,10 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create checkout session"})
 		return
 	}
+
+	// The user is about to change their subscription: make the next
+	// GetSubscription reconcile immediately instead of serving the TTL cache.
+	h.forgetReconcile(userId)
 
 	c.JSON(http.StatusOK, gin.H{"url": redirectURL})
 }
@@ -466,6 +477,10 @@ func (h *Handlers) CancelSubscription(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to cancel subscription"})
 		return
 	}
+
+	// The cancelAtPeriodEnd flag is only derived from live Stripe state, so
+	// the next GetSubscription must reconcile to show it.
+	h.forgetReconcile(userId)
 
 	c.JSON(http.StatusOK, gin.H{"status": sub.Status, "cancelAtPeriodEnd": true})
 }

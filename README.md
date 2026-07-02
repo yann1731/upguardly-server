@@ -370,6 +370,7 @@ All config is loaded from environment variables in `internal/config/config.go`
 | `API_DOMAIN` | `http://localhost:8080` | Public API origin (for SuperTokens) |
 | `WEBSITE_DOMAIN` | `http://localhost:3000` | Frontend origin — CORS + redirect/invite links |
 | `SENDGRID_API_KEY` / `SENDGRID_FROM` / `SENDGRID_FROM_NAME` | — / — / `Upguardly` | SendGrid email alerter + invitations (API key, verified sender, display name) |
+| `EMAIL_ENABLED` | `true` | Kill switch for ALL outbound email (alerts, invites, reset, verify). Set `false` in dev/load tests; sends become dry-run log lines |
 | `TWILIO_SID` / `TWILIO_TOKEN` / `TWILIO_FROM` | — | SMS alerter |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | — | Stripe API + webhook verification |
 | `STRIPE_PRO_PRICE_ID` / `STRIPE_ENTERPRISE_PRICE_ID` | — | Plan → price mapping |

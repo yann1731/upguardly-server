@@ -3,6 +3,7 @@ package alerter
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/sendgrid/sendgrid-go"
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
@@ -22,6 +23,11 @@ func NewEmailAlerter(cfg config.SendGridConfig) *EmailAlerter {
 }
 
 func (a *EmailAlerter) Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error {
+	if !a.config.Enabled {
+		log.Printf("[DRY-RUN] email disabled (EMAIL_ENABLED=false): would send alert to %s — %s is %s", target, monitor.Name, result.Status)
+		return nil
+	}
+
 	if a.config.APIKey == "" {
 		return fmt.Errorf("SendGrid not configured")
 	}

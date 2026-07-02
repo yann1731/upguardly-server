@@ -70,6 +70,11 @@ type SuperTokensConfig struct {
 }
 
 type SendGridConfig struct {
+	// Enabled gates ALL outbound email (alerts, invitations, password reset,
+	// verification). When false, sends become no-ops that log what would have
+	// been sent — set EMAIL_ENABLED=false in development and load tests so
+	// they can't burn SendGrid API quota. Default true.
+	Enabled  bool
 	APIKey   string
 	From     string // verified sender email
 	FromName string // display name, optional
@@ -100,6 +105,7 @@ func Load() *Config {
 			WebsiteDomain: getEnv("WEBSITE_DOMAIN", "http://localhost:3000"),
 		},
 		SendGrid: SendGridConfig{
+			Enabled:  getEnvBool("EMAIL_ENABLED", true),
 			APIKey:   getEnv("SENDGRID_API_KEY", ""),
 			From:     getEnv("SENDGRID_FROM", ""),
 			FromName: getEnv("SENDGRID_FROM_NAME", "Upguardly"),
@@ -174,7 +180,9 @@ func (c *Config) warnMissingSecrets() {
 	if c.Stripe.WebhookSecret == "" {
 		log.Println("[WARN] config: STRIPE_WEBHOOK_SECRET is not set — Stripe webhooks cannot be verified")
 	}
-	if c.SendGrid.APIKey == "" {
+	if !c.SendGrid.Enabled {
+		log.Println("[INFO] config: EMAIL_ENABLED=false — all outbound email is disabled (dry-run logs only)")
+	} else if c.SendGrid.APIKey == "" {
 		log.Println("[WARN] config: SENDGRID_API_KEY is not set — email alerts and invitations will not be sent")
 	}
 	if os.Getenv("METRICS_TOKEN") == "" {

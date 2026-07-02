@@ -53,6 +53,49 @@ func TestGetSubscription(t *testing.T) {
 		require.NotNil(t, store.lastUpsertSub)
 		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
 	})
+
+	t.Run("reconcile is TTL-cached: repeat reads skip Stripe", func(t *testing.T) {
+		sub := aSubscription("PRO")
+		cust := "cus_1"
+		sub.StripeCustomerID = &cust
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{proPriceID: "price_pro", activeSub: aStripeSub("price_pro", false)}
+		router, h := newOrgRouter(store, fs)
+		router.GET("/v1/organizations/:id/subscription", h.GetSubscription)
+
+		for i := 0; i < 5; i++ {
+			w := doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
+			assert.Equal(t, http.StatusOK, w.Code)
+		}
+
+		assert.Equal(t, 1, fs.getActiveSubCalls, "only the first read within the TTL should hit Stripe")
+	})
+
+	t.Run("cancel invalidates the reconcile cache", func(t *testing.T) {
+		sub := aSubscription("PRO")
+		cust := "cus_1"
+		subID := "sub_1"
+		sub.StripeCustomerID = &cust
+		sub.StripeSubscriptionID = &subID
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{proPriceID: "price_pro", activeSub: aStripeSub("price_pro", true)}
+		router, h := newOrgRouter(store, fs)
+		router.GET("/v1/organizations/:id/subscription", h.GetSubscription)
+		router.DELETE("/v1/organizations/:id/subscription", h.CancelSubscription)
+
+		doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
+		require.Equal(t, 1, fs.getActiveSubCalls)
+
+		// Within the TTL a read would normally skip Stripe, but cancel must
+		// force the next read to reconcile (cancelAtPeriodEnd only comes from
+		// live Stripe state).
+		doRequest(router, "DELETE", "/v1/organizations/test-org-id/subscription", "")
+		w := doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 2, fs.getActiveSubCalls, "read after cancel must reconcile again")
+		assert.Contains(t, w.Body.String(), `"cancelAtPeriodEnd":true`)
+	})
 }
 
 func TestCancelSubscription(t *testing.T) {

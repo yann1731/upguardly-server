@@ -19,6 +19,13 @@ const (
 	dispatchBatchSize   = 50
 	dispatchMaxAttempts = 8
 	dispatchSendTimeout = 30 * time.Second
+	// dispatchConcurrency bounds parallel sends within a claimed batch.
+	// Sequential delivery caps throughput at ~1/provider-latency (a few
+	// alerts/sec) — during a mass outage a backlog of thousands would take
+	// tens of minutes to drain. Alerters are stateless and safe for
+	// concurrent use (see alerter.Alerter); the bound keeps us polite to
+	// provider rate limits.
+	dispatchConcurrency = 8
 )
 
 // alertDispatcher drains the alert_outbox table: it claims due rows with
@@ -129,9 +136,20 @@ func (d *alertDispatcher) dispatchBatch() int {
 		return 0
 	}
 
+	// Rows are claimed exclusively by this dispatcher (SKIP LOCKED), so they
+	// can be delivered in parallel without coordination.
+	sem := make(chan struct{}, dispatchConcurrency)
+	var wg sync.WaitGroup
 	for i := range rows {
-		d.deliver(ctx, &rows[i])
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(row *outboxRow) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d.deliver(ctx, row)
+		}(&rows[i])
 	}
+	wg.Wait()
 
 	return len(rows)
 }

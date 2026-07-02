@@ -2,6 +2,7 @@ package mailer
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/sendgrid/sendgrid-go"
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
@@ -15,6 +16,17 @@ type Mailer struct {
 
 func NewMailer(cfg config.SendGridConfig) *Mailer {
 	return &Mailer{cfg: cfg}
+}
+
+// dryRun reports whether email sending is disabled (EMAIL_ENABLED=false) and,
+// if so, logs what would have been sent. The link is logged deliberately: in
+// development it is the only way to complete invite/reset/verify flows.
+func (m *Mailer) dryRun(kind, to, link string) bool {
+	if m.cfg.Enabled {
+		return false
+	}
+	log.Printf("[DRY-RUN] email disabled (EMAIL_ENABLED=false): would send %s to %s — %s", kind, to, link)
+	return true
 }
 
 // disableClickTracking turns off SendGrid's link rewriting for a message. These
@@ -33,6 +45,9 @@ func disableClickTracking(message *mail.SGMailV3) {
 }
 
 func (m *Mailer) SendInvitation(to, orgName, inviterName, acceptURL string) error {
+	if m.dryRun("invitation", to, acceptURL) {
+		return nil
+	}
 	if m.cfg.APIKey == "" {
 		return fmt.Errorf("SendGrid not configured")
 	}
@@ -70,6 +85,9 @@ Upguardly
 }
 
 func (m *Mailer) SendPasswordResetEmail(to, resetURL string) error {
+	if m.dryRun("password reset", to, resetURL) {
+		return nil
+	}
 	if m.cfg.APIKey == "" {
 		return fmt.Errorf("SendGrid not configured")
 	}
@@ -107,6 +125,9 @@ Upguardly
 }
 
 func (m *Mailer) SendVerificationEmail(to, verifyURL string) error {
+	if m.dryRun("verification", to, verifyURL) {
+		return nil
+	}
 	if m.cfg.APIKey == "" {
 		return fmt.Errorf("SendGrid not configured")
 	}

@@ -224,6 +224,7 @@ type fakeStripe struct {
 
 	lastCancelAtPeriodEnd *bool // records the last SetCancelAtPeriodEnd value
 	ensureCalled          bool  // records whether EnsureCustomer was called
+	getActiveSubCalls     int   // counts GetActiveSubscription calls
 }
 
 func (f *fakeStripe) PriceIDForPlan(plan string) (string, error) {
@@ -263,6 +264,7 @@ func (f *fakeStripe) FindCustomerByUser(_ string) (string, error) {
 	return f.findCustID, nil
 }
 func (f *fakeStripe) GetActiveSubscription(_ string) (*stripe.Subscription, error) {
+	f.getActiveSubCalls++
 	return f.activeSub, nil
 }
 
