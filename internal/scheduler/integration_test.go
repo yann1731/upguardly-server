@@ -150,6 +150,38 @@ func TestResultWriterBatchFlush(t *testing.T) {
 	}
 }
 
+// Covers the raw multi-row INSERT edges the happy path misses: a nil
+// status code must land as NULL, and a row whose monitor no longer exists
+// must be skipped without failing the rest of the batch.
+func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+	m := createTestMonitor(t, dbc, fmt.Sprintf("rwx-%d", time.Now().UnixNano()))
+
+	w := newResultWriter(dbc)
+	defer w.stop()
+	w.flush([]pendingResult{
+		{monitorID: m.ID, result: models.CheckResult{Status: models.StatusUP, Latency: 12, Message: "OK"}},
+		{monitorID: "no-such-monitor", result: models.CheckResult{Status: models.StatusUP, Latency: 1}},
+	})
+
+	rows, err := dbc.Prisma.MonitorResult.FindMany(
+		db.MonitorResult.MonitorID.Equals(m.ID),
+	).Exec(ctx)
+	if err != nil {
+		t.Fatalf("list results: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("results = %d, want 1", len(rows))
+	}
+	if _, ok := rows[0].StatusCode(); ok {
+		t.Fatalf("status code should be NULL")
+	}
+	if rows[0].Status != db.StatusUp {
+		t.Fatalf("status = %s, want UP", rows[0].Status)
+	}
+}
+
 func TestOutboxEnqueueAndClaim(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()

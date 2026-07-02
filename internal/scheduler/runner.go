@@ -2,11 +2,14 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/steebchen/prisma-client-go/runtime/transaction"
 
 	"upguardly-backend/internal/alerter"
@@ -154,8 +157,8 @@ func (r *checkRunner) enqueueAlerts(ctx context.Context, m *db.MonitorModel, res
 const (
 	// resultBatchMax bounds how many results one flush writes; resultFlushEvery
 	// bounds how stale a buffered result can get. Together they turn up to
-	// resultBatchMax single-row round trips per second into one batched
-	// transaction.
+	// resultBatchMax single-row round trips per second into one multi-row
+	// INSERT.
 	resultBatchMax   = 200
 	resultFlushEvery = time.Second
 	resultBufferSize = 4096
@@ -237,6 +240,13 @@ func (w *resultWriter) loop() {
 	}
 }
 
+// flush writes the batch as one multi-row INSERT via ExecuteRaw. The
+// generated CreateOne path costs a full query-engine round trip (protocol
+// parse, plan, relation connect) per row, and that engine work — not
+// Postgres — dominates backend CPU at high check volume. IDs are generated
+// here because the cuid default lives in the Prisma client, not the DB.
+// The join against monitors drops rows whose monitor was deleted between
+// check and flush, which would otherwise fail the whole statement on FK.
 func (w *resultWriter) flush(batch []pendingResult) {
 	if len(batch) == 0 {
 		return
@@ -247,26 +257,45 @@ func (w *resultWriter) flush(batch []pendingResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	queries := make([]transaction.Transaction, 0, len(batch))
-	for _, p := range batch {
-		queries = append(queries, w.createQuery(p).Tx())
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO monitor_results (id, monitor_id, status, latency, status_code, message) ` +
+		`SELECT v.id, v.monitor_id, v.status::"Status", v.latency, v.status_code, v.message FROM (VALUES `)
+	params := make([]interface{}, 0, len(batch)*6)
+	for i, p := range batch {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		n := len(params)
+		fmt.Fprintf(&sb, `($%d::text, $%d::text, $%d::text, $%d::int4, $%d::int4, $%d::text)`,
+			n+1, n+2, n+3, n+4, n+5, n+6)
+		var statusCode interface{}
+		if p.result.StatusCode != nil {
+			statusCode = *p.result.StatusCode
+		}
+		params = append(params,
+			uuid.NewString(), p.monitorID, string(p.result.Status),
+			p.result.Latency, statusCode, p.result.Message,
+		)
 	}
+	sb.WriteString(`) AS v(id, monitor_id, status, latency, status_code, message) ` +
+		`JOIN monitors ON monitors.id = v.monitor_id`)
 
-	if err := w.db.Prisma.Prisma.Transaction(queries...).Exec(ctx); err != nil {
-		// The whole transaction fails if any single row does (e.g. its
-		// monitor was deleted between check and flush). Retry rows
-		// individually so one bad row can't discard the batch.
+	res, err := w.db.Prisma.Prisma.ExecuteRaw(sb.String(), params...).Exec(ctx)
+	if err != nil {
 		log.Printf("Batch result insert failed (%d rows), retrying individually: %v", len(batch), err)
 		for _, p := range batch {
 			w.insertOne(ctx, p)
 		}
+		return
+	}
+	if res.Count < len(batch) {
+		log.Printf("Batch result insert skipped %d of %d rows (monitor deleted)", len(batch)-res.Count, len(batch))
 	}
 }
 
 // resultInsert is the subset of the generated create builder the writer
 // needs (the concrete builder type is unexported).
 type resultInsert interface {
-	Tx() db.MonitorResultUniqueTxResult
 	Exec(ctx context.Context) (*db.MonitorResultModel, error)
 }
 
