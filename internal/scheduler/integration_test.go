@@ -222,7 +222,7 @@ func TestOutboxEnqueueAndClaim(t *testing.T) {
 
 	var row *outboxRow
 	for i := range rows {
-		if string(rows[i].AlertID) == alertCfg.ID {
+		if rows[i].AlertID != nil && string(*rows[i].AlertID) == alertCfg.ID {
 			row = &rows[i]
 		}
 	}
@@ -280,5 +280,130 @@ func TestOutboxEnqueueAndClaim(t *testing.T) {
 	}
 	if hist[0].Message != "delivered" {
 		t.Fatalf("history message = %q, want %q", hist[0].Message, "delivered")
+	}
+}
+
+// Covers the global notification-channel enqueue path: a monitor with no
+// per-monitor alerts inherits the owner's channels, a per-monitor override
+// opts one channel out, a per-monitor alert with the same (channel, target)
+// suppresses the duplicate global send, and finalize links history to the
+// channel instead of an alert.
+func TestOutboxGlobalChannels(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+
+	// A unique owner per run: channels are per-user, so reusing "it-user"
+	// would leak channels between runs.
+	owner := fmt.Sprintf("it-user-gc-%d", time.Now().UnixNano())
+	m, err := dbc.Prisma.Monitor.CreateOne(
+		db.Monitor.UserID.Set(owner),
+		db.Monitor.Name.Set("it-monitor-gc"),
+		db.Monitor.Type.Set(db.MonitorTypeHTTP),
+		db.Monitor.Target.Set("https://example.com"),
+	).Exec(ctx)
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = dbc.Prisma.Monitor.FindUnique(db.Monitor.ID.Equals(m.ID)).Delete().Exec(ctx)
+	})
+
+	newChannel := func(channel db.AlertChannel, target string) *db.NotificationChannelModel {
+		ch, err := dbc.Prisma.NotificationChannel.CreateOne(
+			db.NotificationChannel.UserID.Set(owner),
+			db.NotificationChannel.Channel.Set(channel),
+			db.NotificationChannel.Target.Set(target),
+			db.NotificationChannel.Enabled.Set(true),
+		).Exec(ctx)
+		if err != nil {
+			t.Fatalf("create channel: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = dbc.Prisma.NotificationChannel.FindUnique(db.NotificationChannel.ID.Equals(ch.ID)).Delete().Exec(ctx)
+		})
+		return ch
+	}
+
+	chEmail := newChannel(db.AlertChannelEmail, "global@example.com")
+	chDiscord := newChannel(db.AlertChannelDiscord, "https://discord.example.com/webhook")
+
+	// Opt the monitor out of the Discord channel.
+	if _, err := dbc.Prisma.MonitorChannelSetting.CreateOne(
+		db.MonitorChannelSetting.Monitor.Link(db.Monitor.ID.Equals(m.ID)),
+		db.MonitorChannelSetting.NotificationChannel.Link(db.NotificationChannel.ID.Equals(chDiscord.ID)),
+		db.MonitorChannelSetting.Enabled.Set(false),
+	).Exec(ctx); err != nil {
+		t.Fatalf("create channel setting: %v", err)
+	}
+
+	r := &checkRunner{db: dbc}
+	result := &models.CheckResult{Status: models.StatusDOWN, Latency: 7, Message: "down"}
+	r.enqueueAlerts(ctx, m, result)
+
+	rows, err := dbc.Prisma.AlertOutbox.FindMany(
+		db.AlertOutbox.MonitorID.Equals(m.ID),
+	).Exec(ctx)
+	if err != nil {
+		t.Fatalf("list outbox: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("outbox rows = %d, want 1 (email inherited, discord opted out)", len(rows))
+	}
+	if chID, ok := rows[0].NotificationChannelID(); !ok || chID != chEmail.ID {
+		t.Fatalf("row channel link = %v/%v, want %s", chID, ok, chEmail.ID)
+	}
+	if _, ok := rows[0].AlertID(); ok {
+		t.Fatalf("global-channel row must have NULL alert_id")
+	}
+
+	// A per-monitor alert with the same (channel, target) suppresses the
+	// duplicate global send.
+	if _, err := dbc.Prisma.Alert.CreateOne(
+		db.Alert.Monitor.Link(db.Monitor.ID.Equals(m.ID)),
+		db.Alert.Channel.Set(db.AlertChannelEmail),
+		db.Alert.Target.Set("global@example.com"),
+	).Exec(ctx); err != nil {
+		t.Fatalf("create alert: %v", err)
+	}
+	r.enqueueAlerts(ctx, m, result)
+
+	rows, err = dbc.Prisma.AlertOutbox.FindMany(
+		db.AlertOutbox.MonitorID.Equals(m.ID),
+	).Exec(ctx)
+	if err != nil {
+		t.Fatalf("list outbox after dedupe: %v", err)
+	}
+	if len(rows) != 2 { // first enqueue's row + one deduped alert row
+		t.Fatalf("outbox rows = %d, want 2 (duplicate global send suppressed)", len(rows))
+	}
+
+	// finalize on a global-channel row links history to the channel.
+	var claimed []outboxRow
+	if err := dbc.Prisma.Prisma.QueryRaw(claimQuery).Exec(ctx, &claimed); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	var row *outboxRow
+	for i := range claimed {
+		if claimed[i].NotificationChannelID != nil && string(*claimed[i].NotificationChannelID) == chEmail.ID {
+			row = &claimed[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("global-channel outbox row not claimed")
+	}
+	d := &alertDispatcher{db: dbc}
+	d.finalize(ctx, row, "delivered")
+
+	hist, err := dbc.Prisma.AlertHistory.FindMany(
+		db.AlertHistory.NotificationChannelID.Equals(chEmail.ID),
+	).Exec(ctx)
+	if err != nil {
+		t.Fatalf("list history: %v", err)
+	}
+	if len(hist) != 1 {
+		t.Fatalf("history rows = %d, want 1", len(hist))
+	}
+	if _, ok := hist[0].AlertID(); ok {
+		t.Fatalf("global-channel history must have NULL alert_id")
 	}
 }

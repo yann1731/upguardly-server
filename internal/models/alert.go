@@ -5,10 +5,11 @@ import "time"
 type AlertChannel string
 
 const (
-	AlertChannelEMAIL   AlertChannel = "EMAIL"
-	AlertChannelSMS     AlertChannel = "SMS"
-	AlertChannelDISCORD AlertChannel = "DISCORD"
-	AlertChannelSLACK   AlertChannel = "SLACK"
+	AlertChannelEMAIL    AlertChannel = "EMAIL"
+	AlertChannelSMS      AlertChannel = "SMS"
+	AlertChannelDISCORD  AlertChannel = "DISCORD"
+	AlertChannelSLACK    AlertChannel = "SLACK"
+	AlertChannelTELEGRAM AlertChannel = "TELEGRAM"
 )
 
 type Alert struct {
@@ -21,13 +22,13 @@ type Alert struct {
 }
 
 type CreateAlertRequest struct {
-	Channel AlertChannel `json:"channel" binding:"required,oneof=EMAIL SMS DISCORD SLACK"`
+	Channel AlertChannel `json:"channel" binding:"required,oneof=EMAIL SMS DISCORD SLACK TELEGRAM"`
 	Target  string       `json:"target" binding:"required"`
 	Enabled *bool        `json:"enabled"`
 }
 
 type UpdateAlertRequest struct {
-	Channel *AlertChannel `json:"channel" binding:"omitempty,oneof=EMAIL SMS DISCORD SLACK"`
+	Channel *AlertChannel `json:"channel" binding:"omitempty,oneof=EMAIL SMS DISCORD SLACK TELEGRAM"`
 	Target  *string       `json:"target"`
 	Enabled *bool         `json:"enabled"`
 }

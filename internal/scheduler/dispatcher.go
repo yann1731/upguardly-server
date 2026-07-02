@@ -86,21 +86,23 @@ func (d *alertDispatcher) loop() {
 }
 
 // outboxRow mirrors the RETURNING clause of the claim query. Raw scalar types
-// unmarshal the query-engine's JSON encoding.
+// unmarshal the query-engine's JSON encoding. Exactly one of AlertID /
+// NotificationChannelID is set (DB CHECK constraint) — the row's source.
 type outboxRow struct {
-	ID            db.RawString `json:"id"`
-	AlertID       db.RawString `json:"alertId"`
-	MonitorID     db.RawString `json:"monitorId"`
-	Channel       db.RawString `json:"channel"`
-	Target        db.RawString `json:"target"`
-	Status        db.RawString `json:"status"`
-	Message       db.RawString `json:"message"`
-	StatusCode    *db.RawInt   `json:"statusCode"`
-	Latency       db.RawInt    `json:"latency"`
-	MonitorName   db.RawString `json:"monitorName"`
-	MonitorType   db.RawString `json:"monitorType"`
-	MonitorTarget db.RawString `json:"monitorTarget"`
-	Attempts      db.RawInt    `json:"attempts"`
+	ID                    db.RawString  `json:"id"`
+	AlertID               *db.RawString `json:"alertId"`
+	NotificationChannelID *db.RawString `json:"notificationChannelId"`
+	MonitorID             db.RawString  `json:"monitorId"`
+	Channel               db.RawString  `json:"channel"`
+	Target                db.RawString  `json:"target"`
+	Status                db.RawString  `json:"status"`
+	Message               db.RawString  `json:"message"`
+	StatusCode            *db.RawInt    `json:"statusCode"`
+	Latency               db.RawInt     `json:"latency"`
+	MonitorName           db.RawString  `json:"monitorName"`
+	MonitorType           db.RawString  `json:"monitorType"`
+	MonitorTarget         db.RawString  `json:"monitorTarget"`
+	Attempts              db.RawInt     `json:"attempts"`
 }
 
 // claimQuery atomically claims up to dispatchBatchSize due rows: attempts is
@@ -119,7 +121,8 @@ WHERE id IN (
     LIMIT %d
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id, alert_id AS "alertId", monitor_id AS "monitorId", channel, target,
+RETURNING id, alert_id AS "alertId", notification_channel_id AS "notificationChannelId",
+          monitor_id AS "monitorId", channel, target,
           status, message, status_code AS "statusCode", latency,
           monitor_name AS "monitorName", monitor_type AS "monitorType",
           monitor_target AS "monitorTarget", attempts`, dispatchBatchSize)
@@ -194,10 +197,21 @@ func (d *alertDispatcher) deliver(ctx context.Context, row *outboxRow) {
 
 // finalize records the outcome in alert_history and removes the outbox row.
 func (d *alertDispatcher) finalize(ctx context.Context, row *outboxRow, historyMessage string) {
-	if _, err := d.db.Prisma.AlertHistory.CreateOne(
-		db.AlertHistory.Alert.Link(db.Alert.ID.Equals(string(row.AlertID))),
+	// Link the history row to the outbox row's source: a per-monitor alert or
+	// a global notification channel.
+	var source db.AlertHistorySetParam
+	switch {
+	case row.AlertID != nil:
+		source = db.AlertHistory.Alert.Link(db.Alert.ID.Equals(string(*row.AlertID)))
+	case row.NotificationChannelID != nil:
+		source = db.AlertHistory.NotificationChannel.Link(db.NotificationChannel.ID.Equals(string(*row.NotificationChannelID)))
+	}
+	if source == nil {
+		log.Printf("Outbox row %s has no source; skipping history", row.ID)
+	} else if _, err := d.db.Prisma.AlertHistory.CreateOne(
 		db.AlertHistory.Status.Set(db.Status(row.Status)),
 		db.AlertHistory.Message.Set(historyMessage),
+		source,
 	).Exec(ctx); err != nil {
 		log.Printf("Failed to save alert history: %v", err)
 	}

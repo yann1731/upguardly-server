@@ -84,10 +84,11 @@ model Monitor {
   createdAt DateTime      @default(now()) @map("created_at")
   updatedAt DateTime      @updatedAt @map("updated_at")
 
-  results   MonitorResult[]
-  rollups   MonitorResultRollup[]
-  alerts    Alert[]
-  incidents Incident[]
+  results         MonitorResult[]
+  rollups         MonitorResultRollup[]
+  alerts          Alert[]
+  incidents       Incident[]
+  channelSettings MonitorChannelSetting[]
 
   @@index([userId])
   @@index([orgId])
@@ -162,16 +163,56 @@ model Alert {
   @@map("alerts")
 }
 
+// A user's global (account-level) alert channels. Every monitor the user (or
+// their org, resolved via the org owner) owns inherits these by default;
+// MonitorChannelSetting rows override the enabled flag per monitor.
+model NotificationChannel {
+  id        String       @id @default(cuid())
+  userId    String       @map("user_id")
+  channel   AlertChannel
+  target    String
+  enabled   Boolean      @default(true)
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  monitorSettings MonitorChannelSetting[]
+  history         AlertHistory[]
+  outbox          AlertOutbox[]
+
+  @@index([userId])
+  @@map("notification_channels")
+}
+
+// Per-monitor opt-in/opt-out override of a global channel. Absent row =
+// inherit the channel's own enabled flag; deleting a row reverts to inherit.
+model MonitorChannelSetting {
+  id                    String              @id @default(cuid())
+  monitorId             String              @map("monitor_id")
+  monitor               Monitor             @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  notificationChannelId String              @map("notification_channel_id")
+  notificationChannel   NotificationChannel @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
+  enabled               Boolean
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt @map("updated_at")
+
+  @@unique([monitorId, notificationChannelId])
+  @@map("monitor_channel_settings")
+}
+
 // Pending alert deliveries (transactional-outbox pattern). The scheduler
 // enqueues a row per alert config when an incident transition happens; a
 // dispatcher drains due rows with FOR UPDATE SKIP LOCKED (safe with many
 // scheduler instances), retries with exponential backoff, and deletes the row
 // on success or after max attempts. Monitor fields are denormalized so the
 // dispatcher sends exactly what was true at enqueue time, with no joins.
+// Exactly one of alertId / notificationChannelId is set (DB CHECK constraint):
+// the row's source is either a per-monitor alert or a global channel.
 model AlertOutbox {
-  id            String      @id @default(cuid())
-  alertId       String      @map("alert_id")
-  alert         Alert       @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  id                    String               @id @default(cuid())
+  alertId               String?              @map("alert_id")
+  alert                 Alert?               @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  notificationChannelId String?              @map("notification_channel_id")
+  notificationChannel   NotificationChannel? @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
   monitorId     String      @map("monitor_id")
   channel       AlertChannel
   target        String
@@ -192,10 +233,13 @@ model AlertOutbox {
 
 // Partitioned by sent_at (Postgres RANGE); composite PK (id, sent_at) for the
 // same reason as MonitorResult. Write-only audit log — never read by the app.
+// Exactly one of alertId / notificationChannelId is set (DB CHECK constraint).
 model AlertHistory {
-  id      String   @default(cuid())
-  alertId String   @map("alert_id")
-  alert   Alert    @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  id                    String               @default(cuid())
+  alertId               String?              @map("alert_id")
+  alert                 Alert?               @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  notificationChannelId String?              @map("notification_channel_id")
+  notificationChannel   NotificationChannel? @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
   status  Status
   message String
   sentAt  DateTime @default(now()) @map("sent_at")
@@ -243,6 +287,7 @@ enum AlertChannel {
   SMS
   DISCORD
   SLACK
+  TELEGRAM
 }
 
 enum Status {

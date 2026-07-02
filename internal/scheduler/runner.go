@@ -109,9 +109,15 @@ func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel, tracker 
 	log.Printf("Monitor %s: %s (latency: %dms)", m.Name, result.Status, result.Latency)
 }
 
-// enqueueAlerts writes one outbox row per enabled alert config instead of
+// enqueueAlerts writes one outbox row per effective alert config instead of
 // sending inline. The dispatcher delivers with retries, so a slow or down
 // provider neither blocks the check loop nor loses the alert.
+//
+// Effective channels for a monitor are the union of its own enabled Alert
+// rows and the owner's global notification channels, where a per-monitor
+// MonitorChannelSetting overrides the channel's global enabled flag (absent
+// row = inherit). Global channels that duplicate a per-monitor alert's
+// (channel, target) pair are skipped so nobody is paged twice.
 func (r *checkRunner) enqueueAlerts(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) {
 	alerts, err := r.db.Prisma.Alert.FindMany(
 		db.Alert.MonitorID.Equals(m.ID),
@@ -122,36 +128,115 @@ func (r *checkRunner) enqueueAlerts(ctx context.Context, m *db.MonitorModel, res
 		log.Printf("Failed to fetch alerts: %v", err)
 		return
 	}
-	if len(alerts) == 0 {
-		return
-	}
 
 	queries := make([]transaction.Transaction, 0, len(alerts))
+	enqueued := make(map[string]bool, len(alerts))
 	for _, alert := range alerts {
-		optionalParams := []db.AlertOutboxSetParam{
-			db.AlertOutbox.Latency.Set(result.Latency),
-		}
-		if result.StatusCode != nil {
-			optionalParams = append(optionalParams, db.AlertOutbox.StatusCode.Set(*result.StatusCode))
-		}
+		enqueued[string(alert.Channel)+"\x00"+alert.Target] = true
+		queries = append(queries, r.outboxCreate(m, result, alert.Channel, alert.Target,
+			db.AlertOutbox.Alert.Link(db.Alert.ID.Equals(alert.ID))).Tx())
+	}
 
-		queries = append(queries, r.db.Prisma.AlertOutbox.CreateOne(
-			db.AlertOutbox.Alert.Link(db.Alert.ID.Equals(alert.ID)),
-			db.AlertOutbox.MonitorID.Set(m.ID),
-			db.AlertOutbox.Channel.Set(alert.Channel),
-			db.AlertOutbox.Target.Set(alert.Target),
-			db.AlertOutbox.Status.Set(db.Status(result.Status)),
-			db.AlertOutbox.Message.Set(result.Message),
-			db.AlertOutbox.MonitorName.Set(m.Name),
-			db.AlertOutbox.MonitorType.Set(m.Type),
-			db.AlertOutbox.MonitorTarget.Set(m.Target),
-			optionalParams...,
-		).Tx())
+	for _, ch := range r.effectiveGlobalChannels(ctx, m) {
+		if enqueued[string(ch.Channel)+"\x00"+ch.Target] {
+			continue
+		}
+		queries = append(queries, r.outboxCreate(m, result, ch.Channel, ch.Target,
+			db.AlertOutbox.NotificationChannel.Link(db.NotificationChannel.ID.Equals(ch.ID))).Tx())
+	}
+
+	if len(queries) == 0 {
+		return
 	}
 
 	if err := r.db.Prisma.Prisma.Transaction(queries...).Exec(ctx); err != nil {
 		log.Printf("Failed to enqueue %d alert(s) for %s: %v", len(queries), m.Name, err)
 	}
+}
+
+// outboxCreate builds one outbox insert; source links the row to its origin —
+// either a per-monitor Alert or a global NotificationChannel.
+func (r *checkRunner) outboxCreate(m *db.MonitorModel, result *models.CheckResult, channel db.AlertChannel, target string, source db.AlertOutboxSetParam) alertOutboxInsert {
+	optionalParams := []db.AlertOutboxSetParam{
+		source,
+		db.AlertOutbox.Latency.Set(result.Latency),
+	}
+	if result.StatusCode != nil {
+		optionalParams = append(optionalParams, db.AlertOutbox.StatusCode.Set(*result.StatusCode))
+	}
+
+	return r.db.Prisma.AlertOutbox.CreateOne(
+		db.AlertOutbox.MonitorID.Set(m.ID),
+		db.AlertOutbox.Channel.Set(channel),
+		db.AlertOutbox.Target.Set(target),
+		db.AlertOutbox.Status.Set(db.Status(result.Status)),
+		db.AlertOutbox.Message.Set(result.Message),
+		db.AlertOutbox.MonitorName.Set(m.Name),
+		db.AlertOutbox.MonitorType.Set(m.Type),
+		db.AlertOutbox.MonitorTarget.Set(m.Target),
+		optionalParams...,
+	)
+}
+
+// effectiveGlobalChannels returns the owner's global channels that apply to
+// this monitor after per-monitor overrides. Channels are per-user; an org
+// monitor uses the org owner's channels, mirroring how an org's effective
+// plan is its owner's plan.
+func (r *checkRunner) effectiveGlobalChannels(ctx context.Context, m *db.MonitorModel) []db.NotificationChannelModel {
+	ownerID := m.UserID
+	if orgID, ok := m.OrgID(); ok {
+		org, err := r.db.Prisma.Organization.FindUnique(
+			db.Organization.ID.Equals(orgID),
+		).Exec(ctx)
+		if err != nil {
+			log.Printf("Failed to resolve org %s owner for monitor %s, using monitor creator: %v", orgID, m.ID, err)
+		} else {
+			ownerID = org.OwnerID
+		}
+	}
+
+	// Fetch all of the owner's channels (not just globally enabled ones): a
+	// per-monitor override can opt in to a channel that is off globally.
+	channels, err := r.db.Prisma.NotificationChannel.FindMany(
+		db.NotificationChannel.UserID.Equals(ownerID),
+	).Exec(ctx)
+	if err != nil {
+		log.Printf("Failed to fetch notification channels for %s: %v", ownerID, err)
+		return nil
+	}
+	if len(channels) == 0 {
+		return nil
+	}
+
+	settings, err := r.db.Prisma.MonitorChannelSetting.FindMany(
+		db.MonitorChannelSetting.MonitorID.Equals(m.ID),
+	).Exec(ctx)
+	if err != nil {
+		log.Printf("Failed to fetch channel settings for monitor %s: %v", m.ID, err)
+		return nil
+	}
+	overrides := make(map[string]bool, len(settings))
+	for _, s := range settings {
+		overrides[s.NotificationChannelID] = s.Enabled
+	}
+
+	effective := channels[:0]
+	for _, ch := range channels {
+		enabled := ch.Enabled
+		if o, ok := overrides[ch.ID]; ok {
+			enabled = o
+		}
+		if enabled {
+			effective = append(effective, ch)
+		}
+	}
+	return effective
+}
+
+// alertOutboxInsert is the subset of the generated create builder
+// enqueueAlerts needs (the concrete builder type is unexported).
+type alertOutboxInsert interface {
+	Tx() db.AlertOutboxUniqueTxResult
 }
 
 const (

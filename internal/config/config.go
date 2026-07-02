@@ -12,6 +12,7 @@ type Config struct {
 	DatabaseURL string
 	SendGrid    SendGridConfig
 	Twilio      TwilioConfig
+	Telegram    TelegramConfig
 	SuperTokens SuperTokensConfig
 	Etcd        EtcdConfig
 	Scheduler   SchedulerConfig
@@ -87,6 +88,13 @@ type TwilioConfig struct {
 	FromNumber   string
 }
 
+type TelegramConfig struct {
+	// BotToken authenticates the shared Upguardly bot against the Telegram Bot
+	// API. Unlike Discord/Slack (where the alert target is the webhook URL),
+	// Telegram targets are chat IDs and every send goes through this bot.
+	BotToken string
+}
+
 type StripeConfig struct {
 	SecretKey         string
 	WebhookSecret     string
@@ -115,6 +123,9 @@ func Load() *Config {
 			APIKeySID:    getEnv("TWILIO_API_KEY_SID", ""),
 			APIKeySecret: getEnv("TWILIO_API_KEY_SECRET", ""),
 			FromNumber:   getEnv("TWILIO_FROM", ""),
+		},
+		Telegram: TelegramConfig{
+			BotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
 		},
 		Etcd: EtcdConfig{
 			Endpoints:   []string{getEnv("ETCD_ENDPOINT", "http://localhost:2379")},
@@ -184,6 +195,9 @@ func (c *Config) warnMissingSecrets() {
 		log.Println("[INFO] config: EMAIL_ENABLED=false — all outbound email is disabled (dry-run logs only)")
 	} else if c.SendGrid.APIKey == "" {
 		log.Println("[WARN] config: SENDGRID_API_KEY is not set — email alerts and invitations will not be sent")
+	}
+	if c.Telegram.BotToken == "" {
+		log.Println("[WARN] config: TELEGRAM_BOT_TOKEN is not set — Telegram alerts will not be sent")
 	}
 	if os.Getenv("METRICS_TOKEN") == "" {
 		log.Println("[WARN] config: METRICS_TOKEN is not set — /metrics endpoint is publicly accessible")

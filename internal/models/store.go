@@ -32,6 +32,17 @@ type Store interface {
 	UpdateAlert(ctx context.Context, id string, req UpdateAlertRequest) (*Alert, error)
 	DeleteAlert(ctx context.Context, id string) error
 
+	// Notification channels (global, per-user) and per-monitor overrides
+	CreateNotificationChannel(ctx context.Context, userId, channel, target string, enabled bool) (*NotificationChannel, error)
+	ListNotificationChannels(ctx context.Context, userId string) ([]NotificationChannel, error)
+	CountNotificationChannels(ctx context.Context, userId string) (int, error)
+	GetNotificationChannel(ctx context.Context, id, userId string) (*NotificationChannel, error)
+	UpdateNotificationChannel(ctx context.Context, id, userId string, req UpdateNotificationChannelRequest) (*NotificationChannel, error)
+	DeleteNotificationChannel(ctx context.Context, id, userId string) error
+	ListMonitorChannelSettings(ctx context.Context, monitorId string) ([]MonitorChannelSetting, error)
+	UpsertMonitorChannelSetting(ctx context.Context, monitorId, channelId string, enabled bool) (*MonitorChannelSetting, error)
+	DeleteMonitorChannelSetting(ctx context.Context, monitorId, channelId string) error
+
 	// Organizations
 	CreateOrganization(ctx context.Context, userId, name string) (*Organization, error)
 	GetOrganization(ctx context.Context, id string) (*Organization, error)

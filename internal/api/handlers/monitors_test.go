@@ -78,7 +78,7 @@ func TestCreateMonitor(t *testing.T) {
 	})
 
 	t.Run("PRO plan allows beyond free limit", func(t *testing.T) {
-		// PRO caps at 50; org has 6 monitors — should succeed. The org's plan is
+		// PRO caps at 20; org has 6 monitors — should succeed. The org's plan is
 		// its owner's plan, so the org resolves to its owner (testUserID) → PRO.
 		store := &mockStore{
 			monitorResult:    aMonitor(),

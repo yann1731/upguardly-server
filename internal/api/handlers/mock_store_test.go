@@ -36,6 +36,18 @@ type mockStore struct {
 	alertsErr       error
 	deleteErr       error
 
+	// notification channel return values
+	channelResult         *models.NotificationChannel
+	channelErr            error
+	channelsResult        []models.NotificationChannel
+	channelsErr           error
+	channelCount          int
+	channelCountErr       error
+	channelSettingResult  *models.MonitorChannelSetting
+	channelSettingErr     error
+	channelSettingsResult []models.MonitorChannelSetting
+	channelSettingsErr    error
+
 	// org / subscription / membership return values
 	orgResult        *models.Organization
 	orgErr           error
@@ -104,6 +116,36 @@ func (m *mockStore) UpdateAlert(_ context.Context, _ string, _ models.UpdateAler
 	return m.alertResult, m.alertErr
 }
 func (m *mockStore) DeleteAlert(_ context.Context, _ string) error {
+	return m.deleteErr
+}
+
+// ── Notification channel stubs ────────────────────────────────────────────────
+
+func (m *mockStore) CreateNotificationChannel(_ context.Context, _, _, _ string, _ bool) (*models.NotificationChannel, error) {
+	return m.channelResult, m.channelErr
+}
+func (m *mockStore) ListNotificationChannels(_ context.Context, _ string) ([]models.NotificationChannel, error) {
+	return m.channelsResult, m.channelsErr
+}
+func (m *mockStore) CountNotificationChannels(_ context.Context, _ string) (int, error) {
+	return m.channelCount, m.channelCountErr
+}
+func (m *mockStore) GetNotificationChannel(_ context.Context, _, _ string) (*models.NotificationChannel, error) {
+	return m.channelResult, m.channelErr
+}
+func (m *mockStore) UpdateNotificationChannel(_ context.Context, _, _ string, _ models.UpdateNotificationChannelRequest) (*models.NotificationChannel, error) {
+	return m.channelResult, m.channelErr
+}
+func (m *mockStore) DeleteNotificationChannel(_ context.Context, _, _ string) error {
+	return m.deleteErr
+}
+func (m *mockStore) ListMonitorChannelSettings(_ context.Context, _ string) ([]models.MonitorChannelSetting, error) {
+	return m.channelSettingsResult, m.channelSettingsErr
+}
+func (m *mockStore) UpsertMonitorChannelSetting(_ context.Context, _, _ string, _ bool) (*models.MonitorChannelSetting, error) {
+	return m.channelSettingResult, m.channelSettingErr
+}
+func (m *mockStore) DeleteMonitorChannelSetting(_ context.Context, _, _ string) error {
 	return m.deleteErr
 }
 

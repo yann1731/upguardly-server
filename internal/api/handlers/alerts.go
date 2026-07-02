@@ -16,6 +16,10 @@ import (
 // e164Regexp validates E.164 international phone numbers.
 var e164Regexp = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
 
+// telegramChatIDRegexp validates Telegram targets: a numeric chat ID
+// (negative for groups/supergroups) or a public @channelusername.
+var telegramChatIDRegexp = regexp.MustCompile(`^(-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$`)
+
 // validateAlertTarget checks that the alert destination is valid and safe.
 // For webhook channels (DISCORD, SLACK) it also prevents SSRF by rejecting
 // URLs that point to private or reserved IP ranges.
@@ -28,6 +32,12 @@ func validateAlertTarget(channel models.AlertChannel, target string) error {
 	case models.AlertChannelSMS:
 		if !e164Regexp.MatchString(target) {
 			return fmt.Errorf("invalid SMS target: must be an E.164 phone number (e.g. +12125551234)")
+		}
+		return nil
+
+	case models.AlertChannelTELEGRAM:
+		if !telegramChatIDRegexp.MatchString(target) {
+			return fmt.Errorf("invalid Telegram target: must be a chat ID (e.g. 123456789) or @channelusername")
 		}
 		return nil
 
@@ -102,6 +112,12 @@ func (h *Handlers) CreateAlert(c *gin.Context) {
 		plan = h.planForOrg(c.Request.Context(), *monitor.OrgID)
 	}
 	limits := models.LimitsForPlan(plan)
+	if !limits.ChannelAllowed(req.Channel) {
+		c.JSON(http.StatusPaymentRequired, gin.H{
+			"error": fmt.Sprintf("The %s channel is not included in your plan. Upgrade to use it.", req.Channel),
+		})
+		return
+	}
 	if limits.MaxAlertsPerMonitor != models.Unlimited {
 		existing, err := h.store.ListAlerts(c.Request.Context(), monitorID, userId)
 		if err != nil {
@@ -177,9 +193,27 @@ func (h *Handlers) UpdateAlert(c *gin.Context) {
 		return
 	}
 
-	if _, err := h.store.GetMonitor(c.Request.Context(), alert.MonitorID, userId); err != nil {
+	monitor, err := h.store.GetMonitor(c.Request.Context(), alert.MonitorID, userId)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Alert not found"})
 		return
+	}
+
+	// Switching to a different channel counts as configuring it, so it is
+	// plan-gated like CreateAlert. Editing the target or toggling enabled on
+	// an existing channel is not — after a downgrade, users keep control of
+	// (and delivery on) channels they configured while entitled.
+	if req.Channel != nil && *req.Channel != alert.Channel {
+		plan := h.planForUser(c.Request.Context(), userId)
+		if monitor.OrgID != nil {
+			plan = h.planForOrg(c.Request.Context(), *monitor.OrgID)
+		}
+		if !models.LimitsForPlan(plan).ChannelAllowed(*req.Channel) {
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error": fmt.Sprintf("The %s channel is not included in your plan. Upgrade to use it.", *req.Channel),
+			})
+			return
+		}
 	}
 
 	// Validate the new target if either channel or target is being changed.
