@@ -13,6 +13,10 @@ type PlanLimits struct {
 	// Enforced only at configuration time: channels created before a
 	// downgrade keep delivering (grace), the user just can't add more.
 	AllowedChannels []AlertChannel
+	// MaxRegions caps how many regions a single monitor may be checked from.
+	// Like AllowedChannels this is enforced at configuration time only:
+	// monitors configured before a downgrade keep their regions.
+	MaxRegions int
 }
 
 // Unlimited is the sentinel used for plans with no cap on a given resource.
@@ -40,13 +44,13 @@ func (l PlanLimits) ChannelAllowed(ch AlertChannel) bool {
 func LimitsForPlan(plan string) PlanLimits {
 	switch plan {
 	case "PRO":
-		return PlanLimits{MaxMonitors: 20, MaxGlobalChannels: 10, MinInterval: 60, AllowedChannels: paidChannels}
+		return PlanLimits{MaxMonitors: 20, MaxGlobalChannels: 10, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: 3}
 	case "ENTERPRISE":
-		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels}
+		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: Unlimited}
 	default: // FREE and anything unrecognised
 		// Integrations are the only alert destinations (per-monitor alerts no
 		// longer exist), so FREE gets one per allowed channel type — matching
 		// the pricing page's "3 alert integrations".
-		return PlanLimits{MaxMonitors: 5, MaxGlobalChannels: 3, MinInterval: 300, AllowedChannels: freeChannels}
+		return PlanLimits{MaxMonitors: 5, MaxGlobalChannels: 3, MinInterval: 300, AllowedChannels: freeChannels, MaxRegions: 1}
 	}
 }

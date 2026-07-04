@@ -68,7 +68,7 @@ func trustedProxies() []string {
 	return []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1/32"}
 }
 
-func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *stripeservice.Client) *gin.Engine {
+func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *stripeservice.Client, availableRegions []string) *gin.Engine {
 	router := gin.Default()
 
 	// Trust only the reverse proxy / load balancer in front of us so that
@@ -105,7 +105,7 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 		})).ServeHTTP(c.Writer, c.Request)
 	})
 
-	h := handlers.NewHandlers(store, m, s)
+	h := handlers.NewHandlers(store, m, s, availableRegions)
 
 	v1 := router.Group("/v1")
 	{
@@ -119,6 +119,9 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 		{
 			// Current authenticated user (identity/email for the settings page).
 			protected.GET("/me", h.GetMe)
+
+			// Regions monitors can be checked from (deployed subset of the registry).
+			protected.GET("/regions", h.ListRegions)
 
 			// Subscription — billing is per-user (the account), not per-org.
 			// FREE/PRO are single-user; ENTERPRISE additionally unlocks orgs.
@@ -141,6 +144,7 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 				monitors.GET("/:id/results", h.GetMonitorResults)
 				monitors.GET("/:id/incidents", h.GetMonitorIncidents)
 				monitors.GET("/:id/stats", h.GetMonitorStats)
+				monitors.GET("/:id/regions", h.GetMonitorRegions)
 
 				// Per-monitor opt-in/opt-out of the account's global channels.
 				monitors.GET("/:id/channels", h.ListMonitorChannels)

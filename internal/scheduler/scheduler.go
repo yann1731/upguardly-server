@@ -24,6 +24,7 @@ type job struct {
 // one-box deployments. It checks every enabled monitor in-process.
 type Scheduler struct {
 	db       *database.Client
+	region   string
 	runner   *checkRunner
 	jobs     map[string]*job
 	mu       sync.RWMutex
@@ -31,10 +32,11 @@ type Scheduler struct {
 	stopOnce sync.Once
 }
 
-func NewScheduler(dbc *database.Client, alertManager *alerter.Manager) *Scheduler {
+func NewScheduler(dbc *database.Client, alertManager *alerter.Manager, region string) *Scheduler {
 	return &Scheduler{
 		db:     dbc,
-		runner: newCheckRunner(dbc, alertManager),
+		region: region,
+		runner: newCheckRunner(dbc, alertManager, region),
 		jobs:   make(map[string]*job),
 		stopCh: make(chan struct{}),
 	}
@@ -66,6 +68,7 @@ func (s *Scheduler) syncLoop(ctx context.Context) {
 func (s *Scheduler) syncMonitors(ctx context.Context) {
 	monitors, err := s.db.Prisma.Monitor.FindMany(
 		db.Monitor.Enabled.Equals(true),
+		db.Monitor.Regions.Has(s.region),
 	).Exec(ctx)
 
 	if err != nil {

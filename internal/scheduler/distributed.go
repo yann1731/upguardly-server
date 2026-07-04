@@ -17,6 +17,7 @@ import (
 
 type DistributedScheduler struct {
 	db           *database.Client
+	region       string
 	runner       *checkRunner
 	coordinator  *coordination.Coordinator
 	partitions   *coordination.PartitionManager
@@ -35,10 +36,12 @@ func NewDistributedScheduler(
 	coordinator *coordination.Coordinator,
 	partitions *coordination.PartitionManager,
 	syncInterval time.Duration,
+	region string,
 ) *DistributedScheduler {
 	return &DistributedScheduler{
 		db:           dbc,
-		runner:       newCheckRunner(dbc, alertManager),
+		region:       region,
+		runner:       newCheckRunner(dbc, alertManager, region),
 		coordinator:  coordinator,
 		partitions:   partitions,
 		syncInterval: syncInterval,
@@ -131,10 +134,10 @@ func (s *DistributedScheduler) stopJobsForPartitions(partitions []int) {
 	}
 }
 
-// fetchOwnedMonitors returns the enabled monitors in partitions this instance
-// owns. The partition filter runs in SQL (see PartitionSQLExpr), so each
-// instance's sync cost scales with the monitors it owns rather than every
-// instance scanning the entire table.
+// fetchOwnedMonitors returns the enabled monitors that list this scheduler's
+// region and fall in partitions this instance owns. Both filters run in SQL
+// (see PartitionSQLExpr), so each instance's sync cost scales with the
+// monitors it owns rather than every instance scanning the entire table.
 func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.MonitorModel, error) {
 	owned := s.partitions.GetOwnedPartitions()
 	if len(owned) == 0 {
@@ -145,6 +148,7 @@ func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.Mon
 	if len(owned) == s.partitions.PartitionCount() {
 		return s.db.Prisma.Monitor.FindMany(
 			db.Monitor.Enabled.Equals(true),
+			db.Monitor.Regions.Has(s.region),
 		).Exec(ctx)
 	}
 
@@ -154,18 +158,19 @@ func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.Mon
 	}
 
 	// Identifiers and the IN list are internally generated integers/constants,
-	// never user input, so string assembly is safe here.
+	// never user input, so string assembly is safe here; the region is a
+	// bound parameter.
 	query := fmt.Sprintf(
 		`SELECT id, user_id AS "userId", org_id AS "orgId", name, type, target,
-		        "interval", timeout, enabled, created_at AS "createdAt", updated_at AS "updatedAt"
+		        "interval", timeout, enabled, regions, created_at AS "createdAt", updated_at AS "updatedAt"
 		 FROM monitors
-		 WHERE enabled = true AND %s IN (%s)`,
+		 WHERE enabled = true AND $1 = ANY(regions) AND %s IN (%s)`,
 		s.partitions.PartitionSQLExpr(),
 		strings.Join(ids, ","),
 	)
 
 	var raws []db.RawMonitorModel
-	if err := s.db.Prisma.Prisma.QueryRaw(query).Exec(ctx, &raws); err != nil {
+	if err := s.db.Prisma.Prisma.QueryRaw(query, s.region).Exec(ctx, &raws); err != nil {
 		return nil, err
 	}
 
@@ -177,6 +182,10 @@ func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.Mon
 }
 
 func rawToMonitor(r *db.RawMonitorModel) db.MonitorModel {
+	regions := make([]string, len(r.Regions))
+	for i, reg := range r.Regions {
+		regions[i] = string(reg)
+	}
 	m := db.MonitorModel{
 		InnerMonitor: db.InnerMonitor{
 			ID:        string(r.ID),
@@ -187,6 +196,7 @@ func rawToMonitor(r *db.RawMonitorModel) db.MonitorModel {
 			Interval:  int(r.Interval),
 			Timeout:   int(r.Timeout),
 			Enabled:   bool(r.Enabled),
+			Regions:   regions,
 			CreatedAt: r.CreatedAt.Time,
 			UpdatedAt: r.UpdatedAt.Time,
 		},

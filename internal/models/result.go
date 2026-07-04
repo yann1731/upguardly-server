@@ -17,6 +17,7 @@ type MonitorResult struct {
 	Latency    int       `json:"latency"`
 	StatusCode *int      `json:"statusCode,omitempty"`
 	Message    *string   `json:"message,omitempty"`
+	Region     string    `json:"region"`
 	CheckedAt  time.Time `json:"checkedAt"`
 }
 

@@ -81,6 +81,11 @@ model Monitor {
   interval  Int           @default(60)
   timeout   Int           @default(30)
   enabled   Boolean       @default(true)
+  // Region ids (models.Regions registry) this monitor is checked from. Each
+  // region's scheduler pool picks up monitors listing its region; incident
+  // quorum is majority of this list (see maintenance.record_region_check in
+  // migration 20260703120000_add_regions).
+  regions   String[]      @default(["na-east"])
   createdAt DateTime      @default(now()) @map("created_at")
   updatedAt DateTime      @updatedAt @map("updated_at")
 
@@ -89,6 +94,7 @@ model Monitor {
   alerts          Alert[]
   incidents       Incident[]
   channelSettings MonitorChannelSetting[]
+  regionStatus    MonitorRegionStatus[]
 
   @@index([userId])
   @@index([orgId])
@@ -102,13 +108,14 @@ model Monitor {
 model MonitorResultRollup {
   monitorId  String   @map("monitor_id")
   monitor    Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  region     String   @default("na-east")
   bucket     DateTime
   checks     Int
   sumLatency Int      @map("sum_latency")
   minLatency Int      @map("min_latency")
   maxLatency Int      @map("max_latency")
 
-  @@id([monitorId, bucket])
+  @@id([monitorId, region, bucket])
   @@map("monitor_result_rollups")
 }
 
@@ -125,11 +132,31 @@ model MonitorResult {
   latency    Int
   statusCode Int?     @map("status_code")
   message    String?
+  region     String   @default("na-east")
   checkedAt  DateTime @default(now()) @map("checked_at")
 
   @@id([id, checkedAt])
   @@index([monitorId, checkedAt])
   @@map("monitor_results")
+}
+
+// Latest check outcome per (monitor, region): the input to majority-quorum
+// incident evaluation and the per-region status shown in the UI. Written
+// exclusively by maintenance.record_region_check (one row upserted per
+// check); rows for regions removed from a monitor are cleaned up on update
+// and ignored by quorum either way.
+model MonitorRegionStatus {
+  monitorId  String   @map("monitor_id")
+  monitor    Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  region     String
+  status     Status
+  latency    Int      @default(0)
+  statusCode Int?     @map("status_code")
+  message    String?
+  checkedAt  DateTime @default(now()) @map("checked_at")
+
+  @@id([monitorId, region])
+  @@map("monitor_region_status")
 }
 
 model Incident {

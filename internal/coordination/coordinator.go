@@ -13,12 +13,9 @@ import (
 	"upguardly-backend/internal/config"
 )
 
-const (
-	instanceKeyPrefix = "/upguardly/schedulers/instances/"
-)
-
 type InstanceMetadata struct {
 	InstanceID string    `json:"instance_id"`
+	Region     string    `json:"region"`
 	StartedAt  time.Time `json:"started_at"`
 }
 
@@ -29,7 +26,13 @@ type MembershipEvent struct {
 type Coordinator struct {
 	client     *clientv3.Client
 	instanceID string
-	leaseTTL   time.Duration
+	region     string
+	// keyPrefix is region-scoped: instances only see (and share partitions
+	// with) members of their own region, so each region's pool independently
+	// covers every monitor that lists that region. A monitor checked from N
+	// regions is intentionally owned once per region.
+	keyPrefix string
+	leaseTTL  time.Duration
 
 	mu        sync.RWMutex
 	leaseID   clientv3.LeaseID
@@ -40,7 +43,7 @@ type Coordinator struct {
 	doneCh   chan struct{}
 }
 
-func NewCoordinator(cfg config.EtcdConfig, instanceID string, leaseTTL time.Duration) (*Coordinator, error) {
+func NewCoordinator(cfg config.EtcdConfig, instanceID, region string, leaseTTL time.Duration) (*Coordinator, error) {
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   cfg.Endpoints,
 		DialTimeout: cfg.DialTimeout,
@@ -54,6 +57,8 @@ func NewCoordinator(cfg config.EtcdConfig, instanceID string, leaseTTL time.Dura
 	return &Coordinator{
 		client:     client,
 		instanceID: instanceID,
+		region:     region,
+		keyPrefix:  "/upguardly/schedulers/" + region + "/instances/",
 		leaseTTL:   leaseTTL,
 		instances:  []string{},
 		stopCh:     make(chan struct{}),
@@ -88,6 +93,7 @@ func (c *Coordinator) registerLease(ctx context.Context) error {
 
 	metadata := InstanceMetadata{
 		InstanceID: c.instanceID,
+		Region:     c.region,
 		StartedAt:  time.Now(),
 	}
 	metadataJSON, err := json.Marshal(metadata)
@@ -95,7 +101,7 @@ func (c *Coordinator) registerLease(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	key := instanceKeyPrefix + c.instanceID
+	key := c.keyPrefix + c.instanceID
 	_, err = c.client.Put(ctx, key, string(metadataJSON), clientv3.WithLease(leaseResp.ID))
 	if err != nil {
 		return fmt.Errorf("failed to register instance: %w", err)
@@ -199,7 +205,7 @@ func (c *Coordinator) Deregister(ctx context.Context) error {
 		log.Printf("Timeout waiting for keepalive to stop")
 	}
 
-	key := instanceKeyPrefix + c.instanceID
+	key := c.keyPrefix + c.instanceID
 	_, err := c.client.Delete(ctx, key)
 	if err != nil {
 		return fmt.Errorf("failed to delete instance key: %w", err)
@@ -229,7 +235,7 @@ func (c *Coordinator) WatchInstances(ctx context.Context, eventCh chan Membershi
 }
 
 func (c *Coordinator) refreshInstances(ctx context.Context) error {
-	resp, err := c.client.Get(ctx, instanceKeyPrefix, clientv3.WithPrefix())
+	resp, err := c.client.Get(ctx, c.keyPrefix, clientv3.WithPrefix())
 	if err != nil {
 		return fmt.Errorf("failed to list instances: %w", err)
 	}
@@ -254,7 +260,7 @@ func (c *Coordinator) refreshInstances(ctx context.Context) error {
 }
 
 func (c *Coordinator) watchLoop(ctx context.Context, eventCh chan MembershipEvent) {
-	watchCh := c.client.Watch(ctx, instanceKeyPrefix, clientv3.WithPrefix())
+	watchCh := c.client.Watch(ctx, c.keyPrefix, clientv3.WithPrefix())
 
 	for {
 		select {
@@ -268,7 +274,7 @@ func (c *Coordinator) watchLoop(ctx context.Context, eventCh chan MembershipEven
 				// Any membership change that happened while the watch was
 				// down was never delivered, so re-list before resuming.
 				log.Printf("Watch channel closed, restarting watch")
-				watchCh = c.client.Watch(ctx, instanceKeyPrefix, clientv3.WithPrefix())
+				watchCh = c.client.Watch(ctx, c.keyPrefix, clientv3.WithPrefix())
 				if err := c.refreshInstances(ctx); err != nil {
 					log.Printf("Failed to refresh instances after watch restart: %v", err)
 					continue

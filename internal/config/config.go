@@ -4,7 +4,10 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"upguardly-backend/internal/models"
 )
 
 type Config struct {
@@ -19,6 +22,14 @@ type Config struct {
 	Stripe      StripeConfig
 	Redis       RedisConfig
 	RateLimit   RateLimitConfig
+
+	// AvailableRegions are the region ids users may select on a monitor —
+	// the subset of the models.Regions registry that actually has a scheduler
+	// pool deployed. A region configured on a monitor but not deployed can
+	// never report, which under majority quorum silently suppresses alerting;
+	// gating selection on this list is what prevents that. Grow it only after
+	// the region's pool is up (see docs/runbooks/multi-region.md).
+	AvailableRegions []string
 }
 
 type RedisConfig struct {
@@ -48,8 +59,12 @@ type SchedulerConfig struct {
 	// scheduler binary (cmd/scheduler) is running or the API server is scaled to
 	// more than one replica, otherwise monitors are checked — and alerts fired —
 	// multiple times. Default false; enable only for single-box deployments.
-	Embedded       bool
-	InstanceID     string
+	Embedded   bool
+	InstanceID string
+	// Region is the geographic region this scheduler checks from. It scopes
+	// etcd membership (instances only share partitions within their region)
+	// and tags every result row. Must be a registered models.Region id.
+	Region         string
 	PartitionCount int
 	LeaseTTL       time.Duration
 	SyncInterval   time.Duration
@@ -151,6 +166,7 @@ func Load() *Config {
 		Scheduler: SchedulerConfig{
 			Embedded:   getEnvBool("EMBEDDED_SCHEDULER", false),
 			InstanceID: getEnv("SCHEDULER_INSTANCE_ID", "scheduler-0"),
+			Region:     getEnv("SCHEDULER_REGION", models.DefaultRegion),
 			// Default matches the production compose file. With a count of 1
 			// only one instance can ever own work, so scaling out adds zero
 			// capacity — keep this well above the expected instance count.
@@ -166,8 +182,38 @@ func Load() *Config {
 		},
 	}
 
+	cfg.AvailableRegions = parseAvailableRegions(getEnv("AVAILABLE_REGIONS", models.DefaultRegion))
+
 	cfg.warnMissingSecrets()
 	return cfg
+}
+
+// parseAvailableRegions parses the comma-separated AVAILABLE_REGIONS env,
+// dropping duplicates and ids missing from the models.Regions registry.
+// Unknown entries warn rather than fail so a typo can't take the API down,
+// but an empty result falls back to the default region — an API server with
+// zero selectable regions could not create monitors at all.
+func parseAvailableRegions(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		if !models.ValidRegion(p) {
+			log.Printf("[WARN] config: AVAILABLE_REGIONS contains unknown region %q — ignored (known regions: %v)", p, models.RegionIDs())
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		log.Printf("[WARN] config: AVAILABLE_REGIONS resolved to no valid regions — falling back to %q", models.DefaultRegion)
+		out = []string{models.DefaultRegion}
+	}
+	return out
 }
 
 // warnMissingSecrets logs warnings for configuration that is required in

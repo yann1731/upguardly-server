@@ -11,18 +11,18 @@ var (
 	MonitorChecksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "upguardly_monitor_checks_total",
 		Help: "Total number of monitor checks performed.",
-	}, []string{"monitor_id", "monitor_name", "monitor_type", "status"})
+	}, []string{"monitor_id", "monitor_name", "monitor_type", "status", "region"})
 
 	MonitorCheckLatencyMs = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "upguardly_monitor_check_latency_ms",
 		Help:    "Latency of monitor checks in milliseconds.",
 		Buckets: []float64{10, 50, 100, 250, 500, 1000, 2500, 5000},
-	}, []string{"monitor_id", "monitor_name", "monitor_type", "status"})
+	}, []string{"monitor_id", "monitor_name", "monitor_type", "status", "region"})
 
 	MonitorStatus = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "upguardly_monitor_status",
-		Help: "Current status of monitors (1=UP, 0=DEGRADED, -1=DOWN).",
-	}, []string{"monitor_id", "monitor_name", "monitor_type"})
+		Help: "Current status of monitors (1=UP, 0=DEGRADED, -1=DOWN), per checking region.",
+	}, []string{"monitor_id", "monitor_name", "monitor_type", "region"})
 
 	AlertsSentTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "upguardly_alerts_sent_total",

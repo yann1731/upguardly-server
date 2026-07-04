@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"log"
 	"time"
 
 	db "upguardly-backend/internal/database/prisma"
@@ -19,11 +20,12 @@ func NewPrismaStore(client *Client) *PrismaStore {
 
 // ── Monitor ──────────────────────────────────────────────────────────────────
 
-func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool) (*models.Monitor, error) {
+func (s *PrismaStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool, regions []string) (*models.Monitor, error) {
 	optional := []db.MonitorSetParam{
 		db.Monitor.Interval.Set(interval),
 		db.Monitor.Timeout.Set(timeout),
 		db.Monitor.Enabled.Set(enabled),
+		db.Monitor.Regions.Set(regions),
 	}
 	// Solo (FREE/PRO) monitors have no org; only link one when given.
 	if orgId != "" {
@@ -139,12 +141,29 @@ func (s *PrismaStore) UpdateMonitor(ctx context.Context, id, userId string, req 
 	if req.Enabled != nil {
 		params = append(params, db.Monitor.Enabled.Set(*req.Enabled))
 	}
+	if req.Regions != nil {
+		params = append(params, db.Monitor.Regions.Set(*req.Regions))
+	}
 
 	m, err := s.client.Prisma.Monitor.FindUnique(
 		db.Monitor.ID.Equals(id),
 	).Update(params...).Exec(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// Best-effort cleanup of status rows for regions no longer configured.
+	// Quorum and the region-status endpoint both filter to the configured
+	// list, so a failure here is cosmetic (an orphaned row), not correctness.
+	if req.Regions != nil {
+		if _, err := s.client.Prisma.Prisma.ExecuteRaw(
+			`DELETE FROM monitor_region_status
+			  WHERE monitor_id = $1 AND NOT (region = ANY(
+			        SELECT unnest(regions) FROM monitors WHERE id = $1))`,
+			id,
+		).Exec(ctx); err != nil {
+			log.Printf("Failed to clean up region status rows for %s: %v", id, err)
+		}
 	}
 	return monitorToModel(m), nil
 }
@@ -169,7 +188,7 @@ func (s *PrismaStore) DeleteMonitor(ctx context.Context, id, userId string) erro
 	return err
 }
 
-func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId string, limit int) ([]models.MonitorResult, error) {
+func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId string, limit int, region string) ([]models.MonitorResult, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),
 		db.Monitor.Or(
@@ -184,9 +203,13 @@ func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId s
 		return nil, models.ErrNotFound
 	}
 
-	rs, err := s.client.Prisma.MonitorResult.FindMany(
+	filters := []db.MonitorResultWhereParam{
 		db.MonitorResult.MonitorID.Equals(monitorId),
-	).OrderBy(
+	}
+	if region != "" {
+		filters = append(filters, db.MonitorResult.Region.Equals(region))
+	}
+	rs, err := s.client.Prisma.MonitorResult.FindMany(filters...).OrderBy(
 		db.MonitorResult.CheckedAt.Order(db.DESC),
 	).Take(limit).Exec(ctx)
 	if err != nil {
@@ -196,6 +219,63 @@ func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId s
 	out := make([]models.MonitorResult, len(rs))
 	for i := range rs {
 		out[i] = *resultToModel(&rs[i])
+	}
+	return out, nil
+}
+
+// ListMonitorRegionStatus returns the latest per-region outcome for the
+// monitor's configured regions, with staleness computed against the same
+// 3x-interval window quorum uses (models.RegionStaleMultiplier).
+func (s *PrismaStore) ListMonitorRegionStatus(ctx context.Context, monitorId, userId string) ([]models.MonitorRegionStatus, error) {
+	m, err := s.client.Prisma.Monitor.FindFirst(
+		db.Monitor.ID.Equals(monitorId),
+		db.Monitor.Or(
+			db.Monitor.UserID.Equals(userId),
+			db.Monitor.Org.Where(
+				db.Organization.Members.Some(
+					db.OrganizationMember.UserID.Equals(userId),
+				),
+			),
+		),
+	).Exec(ctx)
+	if err != nil {
+		return nil, models.ErrNotFound
+	}
+
+	rows, err := s.client.Prisma.MonitorRegionStatus.FindMany(
+		db.MonitorRegionStatus.MonitorID.Equals(monitorId),
+	).OrderBy(
+		db.MonitorRegionStatus.Region.Order(db.ASC),
+	).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	configured := make(map[string]bool, len(m.Regions))
+	for _, r := range m.Regions {
+		configured[r] = true
+	}
+	staleAfter := time.Duration(m.Interval*models.RegionStaleMultiplier) * time.Second
+
+	out := make([]models.MonitorRegionStatus, 0, len(rows))
+	for i := range rows {
+		if !configured[rows[i].Region] {
+			continue
+		}
+		st := models.MonitorRegionStatus{
+			Region:    rows[i].Region,
+			Status:    models.Status(rows[i].Status),
+			Latency:   rows[i].Latency,
+			CheckedAt: rows[i].CheckedAt,
+			Stale:     time.Since(rows[i].CheckedAt) > staleAfter,
+		}
+		if code, ok := rows[i].StatusCode(); ok {
+			st.StatusCode = &code
+		}
+		if msg, ok := rows[i].Message(); ok {
+			st.Message = &msg
+		}
+		out = append(out, st)
 	}
 	return out, nil
 }
@@ -263,6 +343,26 @@ func (s *PrismaStore) GetMonitorStats(ctx context.Context, monitorId, userId str
 			return nil, err
 		}
 		stats = computeStats(rs, since, until)
+
+		// Per-region series from the same rows (order within a region is
+		// preserved by the filter, so each group stays CheckedAt-ascending).
+		for _, region := range resultRegions(rs) {
+			var group []db.MonitorResultModel
+			for i := range rs {
+				if rs[i].Region == region {
+					group = append(group, rs[i])
+				}
+			}
+			rstats := computeStats(group, since, until)
+			stats.Regions = append(stats.Regions, models.RegionStats{
+				Region:      region,
+				MinLatency:  rstats.MinLatency,
+				MaxLatency:  rstats.MaxLatency,
+				AvgLatency:  rstats.AvgLatency,
+				TotalChecks: rstats.TotalChecks,
+				Points:      rstats.Points,
+			})
+		}
 	} else {
 		// Long window (7d/30d): read hourly rollups instead of every raw row.
 		rus, err := s.client.Prisma.MonitorResultRollup.FindMany(
@@ -277,6 +377,7 @@ func (s *PrismaStore) GetMonitorStats(ctx context.Context, monitorId, userId str
 		rows := make([]rollupRow, len(rus))
 		for i := range rus {
 			rows[i] = rollupRow{
+				Region:     rus[i].Region,
 				Bucket:     rus[i].Bucket,
 				Checks:     rus[i].Checks,
 				SumLatency: rus[i].SumLatency,
@@ -285,6 +386,24 @@ func (s *PrismaStore) GetMonitorStats(ctx context.Context, monitorId, userId str
 			}
 		}
 		stats = computeStatsFromRollups(rows, since, until)
+
+		for _, region := range rollupRegions(rows) {
+			var group []rollupRow
+			for i := range rows {
+				if rows[i].Region == region {
+					group = append(group, rows[i])
+				}
+			}
+			rstats := computeStatsFromRollups(group, since, until)
+			stats.Regions = append(stats.Regions, models.RegionStats{
+				Region:      region,
+				MinLatency:  rstats.MinLatency,
+				MaxLatency:  rstats.MaxLatency,
+				AvgLatency:  rstats.AvgLatency,
+				TotalChecks: rstats.TotalChecks,
+				Points:      rstats.Points,
+			})
+		}
 	}
 
 	incidents, err := s.client.Prisma.Incident.FindMany(
@@ -369,11 +488,39 @@ const rawStatsWindow = 25 * time.Hour
 // rollupRow is a plain projection of an hourly rollup, decoupled from the Prisma
 // model so the aggregation can be unit-tested without a database.
 type rollupRow struct {
+	Region     string
 	Bucket     time.Time
 	Checks     int
 	SumLatency int
 	MinLatency int
 	MaxLatency int
+}
+
+// resultRegions returns the distinct regions present in rs, in first-seen
+// order (stable for the response and tests).
+func resultRegions(rs []db.MonitorResultModel) []string {
+	var regions []string
+	seen := make(map[string]bool)
+	for i := range rs {
+		if !seen[rs[i].Region] {
+			seen[rs[i].Region] = true
+			regions = append(regions, rs[i].Region)
+		}
+	}
+	return regions
+}
+
+// rollupRegions is resultRegions for rollup rows.
+func rollupRegions(rows []rollupRow) []string {
+	var regions []string
+	seen := make(map[string]bool)
+	for i := range rows {
+		if !seen[rows[i].Region] {
+			seen[rows[i].Region] = true
+			regions = append(regions, rows[i].Region)
+		}
+	}
+	return regions
 }
 
 // computeStatsFromRollups mirrors computeStats but works from hourly rollups.
@@ -455,6 +602,7 @@ func monitorToModel(m *db.MonitorModel) *models.Monitor {
 		Interval:  m.Interval,
 		Timeout:   m.Timeout,
 		Enabled:   m.Enabled,
+		Regions:   m.Regions,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}
@@ -488,6 +636,7 @@ func resultToModel(r *db.MonitorResultModel) *models.MonitorResult {
 		MonitorID: r.MonitorID,
 		Status:    models.Status(r.Status),
 		Latency:   r.Latency,
+		Region:    r.Region,
 		CheckedAt: r.CheckedAt,
 	}
 	if code, ok := r.StatusCode(); ok {

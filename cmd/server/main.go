@@ -82,7 +82,7 @@ func main() {
 	// disabled (EMBEDDED_SCHEDULER=false) to avoid duplicate checks and alerts.
 	var sched *scheduler.Scheduler
 	if cfg.Scheduler.Embedded {
-		sched = scheduler.NewScheduler(db, alertManager)
+		sched = scheduler.NewScheduler(db, alertManager, cfg.Scheduler.Region)
 		if err := sched.Start(ctx); err != nil {
 			log.Fatalf("Failed to start scheduler: %v", err)
 		}
@@ -93,7 +93,7 @@ func main() {
 
 	store := database.NewPrismaStore(db)
 	s := stripeservice.NewClient(cfg.Stripe)
-	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain, m, s)
+	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain, m, s, cfg.AvailableRegions)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

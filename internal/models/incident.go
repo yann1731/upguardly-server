@@ -19,13 +19,26 @@ type Incident struct {
 
 // MonitorStats holds aggregate latency statistics and an incident count over a
 // time window, plus a bucketed series for graphing average response time.
+// The top-level aggregates span every region (back-compat with clients that
+// predate regions); Regions carries the same shape per checking region.
 type MonitorStats struct {
-	MinLatency    int         `json:"minLatency"`
-	MaxLatency    int         `json:"maxLatency"`
-	AvgLatency    float64     `json:"avgLatency"`
-	TotalChecks   int         `json:"totalChecks"`
-	IncidentCount int         `json:"incidentCount"`
-	Points        []StatPoint `json:"points"`
+	MinLatency    int           `json:"minLatency"`
+	MaxLatency    int           `json:"maxLatency"`
+	AvgLatency    float64       `json:"avgLatency"`
+	TotalChecks   int           `json:"totalChecks"`
+	IncidentCount int           `json:"incidentCount"`
+	Points        []StatPoint   `json:"points"`
+	Regions       []RegionStats `json:"regions"`
+}
+
+// RegionStats is MonitorStats' latency view restricted to one checking region.
+type RegionStats struct {
+	Region      string      `json:"region"`
+	MinLatency  int         `json:"minLatency"`
+	MaxLatency  int         `json:"maxLatency"`
+	AvgLatency  float64     `json:"avgLatency"`
+	TotalChecks int         `json:"totalChecks"`
+	Points      []StatPoint `json:"points"`
 }
 
 // StatPoint is a single time bucket of average response time.

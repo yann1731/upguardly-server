@@ -105,3 +105,52 @@ func TestComputeStatsFromRollupsEmpty(t *testing.T) {
 		t.Errorf("empty rollups should yield empty (non-nil) Points, got %#v", stats.Points)
 	}
 }
+
+// Per-region stats are the same aggregation run over a region-filtered subset;
+// grouping must neither mix regions nor lose rows.
+func TestRollupRegionGrouping(t *testing.T) {
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	since, until := base, base.Add(48*time.Hour)
+
+	rows := []rollupRow{
+		{Region: "na-east", Bucket: base.Add(1 * time.Hour), Checks: 10, SumLatency: 1000, MinLatency: 50, MaxLatency: 200},
+		{Region: "eu-west", Bucket: base.Add(1 * time.Hour), Checks: 5, SumLatency: 1500, MinLatency: 200, MaxLatency: 400},
+		{Region: "na-east", Bucket: base.Add(2 * time.Hour), Checks: 10, SumLatency: 2000, MinLatency: 100, MaxLatency: 300},
+	}
+
+	regions := rollupRegions(rows)
+	if len(regions) != 2 || regions[0] != "na-east" || regions[1] != "eu-west" {
+		t.Fatalf("rollupRegions = %v, want [na-east eu-west] in first-seen order", regions)
+	}
+
+	var usRows, euRows []rollupRow
+	for _, r := range rows {
+		if r.Region == "na-east" {
+			usRows = append(usRows, r)
+		} else {
+			euRows = append(euRows, r)
+		}
+	}
+
+	us := computeStatsFromRollups(usRows, since, until)
+	if us.TotalChecks != 20 || us.MinLatency != 50 || us.MaxLatency != 300 {
+		t.Fatalf("na-east stats = %+v, want 20 checks, min 50, max 300", us)
+	}
+	if want := 3000.0 / 20.0; us.AvgLatency != want {
+		t.Fatalf("na-east avg = %v, want %v", us.AvgLatency, want)
+	}
+
+	eu := computeStatsFromRollups(euRows, since, until)
+	if eu.TotalChecks != 5 || eu.MinLatency != 200 || eu.MaxLatency != 400 {
+		t.Fatalf("eu-west stats = %+v, want 5 checks, min 200, max 400", eu)
+	}
+	if want := 1500.0 / 5.0; eu.AvgLatency != want {
+		t.Fatalf("eu-west avg = %v, want %v", eu.AvgLatency, want)
+	}
+
+	// The overall pass over all rows must equal the union of the groups.
+	all := computeStatsFromRollups(rows, since, until)
+	if all.TotalChecks != 25 || all.MinLatency != 50 || all.MaxLatency != 400 {
+		t.Fatalf("overall stats = %+v, want 25 checks, min 50, max 400", all)
+	}
+}

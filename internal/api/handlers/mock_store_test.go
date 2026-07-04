@@ -59,18 +59,26 @@ type mockStore struct {
 	subErr           error
 	deleteOrgErr     error
 
+	// region status return values
+	regionStatusResult []models.MonitorRegionStatus
+	regionStatusErr    error
+
 	// captured call args
 	lastLimit                int
 	lastUpsertSub            *models.UpsertSubscriptionParams
 	deleteOrgCalled          bool
 	lastCreateInterval       int
+	lastCreateRegions        []string
+	lastUpdateReq            *models.UpdateMonitorRequest
+	lastResultsRegion        string
 	lastChannelCreateChannel string
 	lastChannelCreateTarget  string
 	lastChannelUpdate        *models.UpdateNotificationChannelRequest
 }
 
-func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval, _ int, _ bool) (*models.Monitor, error) {
+func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval, _ int, _ bool, regions []string) (*models.Monitor, error) {
 	m.lastCreateInterval = interval
+	m.lastCreateRegions = regions
 	return m.monitorResult, m.monitorErr
 }
 func (m *mockStore) CountMonitorsByOrg(_ context.Context, _ string) (int, error) {
@@ -85,15 +93,20 @@ func (m *mockStore) ListMonitors(_ context.Context, _ string) ([]models.Monitor,
 func (m *mockStore) GetMonitor(_ context.Context, _, _ string) (*models.Monitor, error) {
 	return m.monitorResult, m.monitorErr
 }
-func (m *mockStore) UpdateMonitor(_ context.Context, _, _ string, _ models.UpdateMonitorRequest) (*models.Monitor, error) {
+func (m *mockStore) UpdateMonitor(_ context.Context, _, _ string, req models.UpdateMonitorRequest) (*models.Monitor, error) {
+	m.lastUpdateReq = &req
 	return m.monitorResult, m.monitorErr
 }
 func (m *mockStore) DeleteMonitor(_ context.Context, _, _ string) error {
 	return m.deleteErr
 }
-func (m *mockStore) GetMonitorResults(_ context.Context, _, _ string, limit int) ([]models.MonitorResult, error) {
+func (m *mockStore) GetMonitorResults(_ context.Context, _, _ string, limit int, region string) ([]models.MonitorResult, error) {
 	m.lastLimit = limit
+	m.lastResultsRegion = region
 	return m.resultsResult, m.resultsErr
+}
+func (m *mockStore) ListMonitorRegionStatus(_ context.Context, _, _ string) ([]models.MonitorRegionStatus, error) {
+	return m.regionStatusResult, m.regionStatusErr
 }
 func (m *mockStore) ListIncidents(_ context.Context, _, _ string, limit int) ([]models.Incident, error) {
 	m.lastLimit = limit
@@ -216,7 +229,7 @@ func newTestRouter(store *mockStore) (*gin.Engine, *handlers.Handlers) {
 		c.Set("userId", testUserID)
 		c.Next()
 	})
-	h := handlers.NewHandlers(store, nil, nil)
+	h := handlers.NewHandlers(store, nil, nil, models.RegionIDs())
 	return r, h
 }
 
@@ -230,7 +243,7 @@ func newOrgRouter(store *mockStore, s handlers.StripeService) (*gin.Engine, *han
 		c.Set("orgId", testOrgID)
 		c.Next()
 	})
-	h := handlers.NewHandlers(store, nil, s)
+	h := handlers.NewHandlers(store, nil, s, models.RegionIDs())
 	return r, h
 }
 

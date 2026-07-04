@@ -28,3 +28,23 @@ func TestChannelAllowed(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxRegionsPerPlan(t *testing.T) {
+	tests := []struct {
+		plan string
+		want int
+	}{
+		{"FREE", 1},
+		{"PRO", 3},
+		{"ENTERPRISE", Unlimited},
+		// Unknown plans fall back to FREE.
+		{"", 1},
+		{"BOGUS", 1},
+	}
+
+	for _, tt := range tests {
+		if got := LimitsForPlan(tt.plan).MaxRegions; got != tt.want {
+			t.Errorf("LimitsForPlan(%q).MaxRegions = %d, want %d", tt.plan, got, tt.want)
+		}
+	}
+}

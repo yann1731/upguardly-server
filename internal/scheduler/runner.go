@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/steebchen/prisma-client-go/runtime/transaction"
 
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/database"
@@ -27,14 +26,16 @@ import (
 // the database.
 type checkRunner struct {
 	db         *database.Client
+	region     string
 	results    *resultWriter
 	dispatcher *alertDispatcher
 }
 
-func newCheckRunner(dbc *database.Client, alertManager *alerter.Manager) *checkRunner {
+func newCheckRunner(dbc *database.Client, alertManager *alerter.Manager, region string) *checkRunner {
 	return &checkRunner{
 		db:         dbc,
-		results:    newResultWriter(dbc),
+		region:     region,
+		results:    newResultWriter(dbc, region),
 		dispatcher: newAlertDispatcher(dbc, alertManager),
 	}
 }
@@ -52,9 +53,7 @@ func (r *checkRunner) stop() {
 // jobs started in the same sync tick (e.g. all of them, after a restart)
 // don't hit their targets and the database in lockstep forever.
 func (r *checkRunner) jobLoop(ctx context.Context, m *db.MonitorModel) {
-	tracker := newIncidentTracker(r.db)
-
-	r.runCheck(ctx, m, tracker)
+	r.runCheck(ctx, m)
 
 	interval := time.Duration(m.Interval) * time.Second
 	if interval <= 0 {
@@ -77,12 +76,12 @@ func (r *checkRunner) jobLoop(ctx context.Context, m *db.MonitorModel) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.runCheck(ctx, m, tracker)
+			r.runCheck(ctx, m)
 		}
 	}
 }
 
-func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel, tracker *incidentTracker) {
+func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel) {
 	checker := monitor.NewChecker(models.MonitorType(m.Type))
 	if checker == nil {
 		log.Printf("Unknown monitor type: %s", m.Type)
@@ -92,131 +91,58 @@ func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel, tracker 
 	timeout := time.Duration(m.Timeout) * time.Second
 	result := checker.Check(ctx, m.Target, timeout)
 
-	metrics.MonitorChecksTotal.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status)).Inc()
-	metrics.MonitorCheckLatencyMs.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status)).Observe(float64(result.Latency))
-	metrics.MonitorStatus.WithLabelValues(m.ID, m.Name, string(m.Type)).Set(metrics.StatusToGaugeValue(result.Status))
+	metrics.MonitorChecksTotal.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status), r.region).Inc()
+	metrics.MonitorCheckLatencyMs.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status), r.region).Observe(float64(result.Latency))
+	metrics.MonitorStatus.WithLabelValues(m.ID, m.Name, string(m.Type), r.region).Set(metrics.StatusToGaugeValue(result.Status))
 
 	r.results.enqueue(ctx, m.ID, &result)
 
-	// Alerts fire on incident transitions. The open-incident row in Postgres
-	// is the durable status memory shared by all instances, so alerting
-	// survives restarts and partition handoffs, and a monitor that is
-	// unhealthy from its very first check still alerts.
-	if tracker.record(ctx, m.ID, &result) != transitionNone {
-		r.enqueueAlerts(ctx, m, &result)
+	if transition := r.recordRegionCheck(ctx, m, &result); transition != "none" {
+		log.Printf("Monitor %s: incident %s (region %s reported %s)", m.Name, transition, r.region, result.Status)
 	}
 
-	log.Printf("Monitor %s: %s (latency: %dms)", m.Name, result.Status, result.Latency)
+	log.Printf("Monitor %s [%s]: %s (latency: %dms)", m.Name, r.region, result.Status, result.Latency)
 }
 
-// enqueueAlerts writes one outbox row per effective alert config instead of
-// sending inline. The dispatcher delivers with retries, so a slow or down
-// provider neither blocks the check loop nor loses the alert.
+// regionCheckRow is the result of maintenance.record_region_check.
+type regionCheckRow struct {
+	Transition db.RawString  `json:"transition"`
+	IncidentID *db.RawString `json:"incidentId"`
+}
+
+// recordRegionCheck reports this region's check outcome to Postgres and
+// returns the incident transition it caused ("none", "opened", "escalated",
+// "resolved"). Everything stateful lives in maintenance.record_region_check
+// (migration 20260703120000_add_regions): it upserts this region's row,
+// evaluates majority quorum across the monitor's configured regions under a
+// per-monitor advisory lock, transitions the global incident, and enqueues
+// alert_outbox rows in the same transaction. This replaced the in-memory
+// incidentTracker and Go-side enqueueAlerts/effectiveGlobalChannels: with
+// multiple regions checking the same monitor there is no single writer any
+// more, so the serialization has to live in the database.
 //
-// The effective channels for a monitor are the owner's global notification
-// channels, where a per-monitor MonitorChannelSetting overrides the channel's
-// global enabled flag (absent row = inherit).
-func (r *checkRunner) enqueueAlerts(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) {
-	channels := r.effectiveGlobalChannels(ctx, m)
-
-	queries := make([]transaction.Transaction, 0, len(channels))
-	for _, ch := range channels {
-		queries = append(queries, r.outboxCreate(m, result, ch.Channel, ch.Target,
-			db.AlertOutbox.NotificationChannel.Link(db.NotificationChannel.ID.Equals(ch.ID))).Tx())
-	}
-
-	if len(queries) == 0 {
-		return
-	}
-
-	if err := r.db.Prisma.Prisma.Transaction(queries...).Exec(ctx); err != nil {
-		log.Printf("Failed to enqueue %d alert(s) for %s: %v", len(queries), m.Name, err)
-	}
-}
-
-// outboxCreate builds one outbox insert; source links the row to the global
-// NotificationChannel it came from.
-func (r *checkRunner) outboxCreate(m *db.MonitorModel, result *models.CheckResult, channel db.AlertChannel, target string, source db.AlertOutboxSetParam) alertOutboxInsert {
-	optionalParams := []db.AlertOutboxSetParam{
-		source,
-		db.AlertOutbox.Latency.Set(result.Latency),
-	}
+// On error we only log: the next check retries, which is the same recovery
+// semantics the tracker had (a DB error meant "stay unloaded; retry").
+func (r *checkRunner) recordRegionCheck(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) string {
+	var statusCode interface{}
 	if result.StatusCode != nil {
-		optionalParams = append(optionalParams, db.AlertOutbox.StatusCode.Set(*result.StatusCode))
+		statusCode = *result.StatusCode
 	}
 
-	return r.db.Prisma.AlertOutbox.CreateOne(
-		db.AlertOutbox.MonitorID.Set(m.ID),
-		db.AlertOutbox.Channel.Set(channel),
-		db.AlertOutbox.Target.Set(target),
-		db.AlertOutbox.Status.Set(db.Status(result.Status)),
-		db.AlertOutbox.Message.Set(result.Message),
-		db.AlertOutbox.MonitorName.Set(m.Name),
-		db.AlertOutbox.MonitorType.Set(m.Type),
-		db.AlertOutbox.MonitorTarget.Set(m.Target),
-		optionalParams...,
-	)
-}
-
-// effectiveGlobalChannels returns the owner's global channels that apply to
-// this monitor after per-monitor overrides. Channels are per-user; an org
-// monitor uses the org owner's channels, mirroring how an org's effective
-// plan is its owner's plan.
-func (r *checkRunner) effectiveGlobalChannels(ctx context.Context, m *db.MonitorModel) []db.NotificationChannelModel {
-	ownerID := m.UserID
-	if orgID, ok := m.OrgID(); ok {
-		org, err := r.db.Prisma.Organization.FindUnique(
-			db.Organization.ID.Equals(orgID),
-		).Exec(ctx)
-		if err != nil {
-			log.Printf("Failed to resolve org %s owner for monitor %s, using monitor creator: %v", orgID, m.ID, err)
-		} else {
-			ownerID = org.OwnerID
-		}
-	}
-
-	// Fetch all of the owner's channels (not just globally enabled ones): a
-	// per-monitor override can opt in to a channel that is off globally.
-	channels, err := r.db.Prisma.NotificationChannel.FindMany(
-		db.NotificationChannel.UserID.Equals(ownerID),
-	).Exec(ctx)
+	var rows []regionCheckRow
+	err := r.db.Prisma.Prisma.QueryRaw(
+		`SELECT transition, incident_id AS "incidentId"
+		   FROM maintenance.record_region_check($1::text, $2::text, $3::"Status", $4::int4, $5::int4, $6::text)`,
+		m.ID, r.region, string(result.Status), result.Latency, statusCode, result.Message,
+	).Exec(ctx, &rows)
 	if err != nil {
-		log.Printf("Failed to fetch notification channels for %s: %v", ownerID, err)
-		return nil
+		log.Printf("Failed to record region check for %s: %v", m.ID, err)
+		return "none"
 	}
-	if len(channels) == 0 {
-		return nil
+	if len(rows) == 0 {
+		return "none"
 	}
-
-	settings, err := r.db.Prisma.MonitorChannelSetting.FindMany(
-		db.MonitorChannelSetting.MonitorID.Equals(m.ID),
-	).Exec(ctx)
-	if err != nil {
-		log.Printf("Failed to fetch channel settings for monitor %s: %v", m.ID, err)
-		return nil
-	}
-	overrides := make(map[string]bool, len(settings))
-	for _, s := range settings {
-		overrides[s.NotificationChannelID] = s.Enabled
-	}
-
-	effective := channels[:0]
-	for _, ch := range channels {
-		enabled := ch.Enabled
-		if o, ok := overrides[ch.ID]; ok {
-			enabled = o
-		}
-		if enabled {
-			effective = append(effective, ch)
-		}
-	}
-	return effective
-}
-
-// alertOutboxInsert is the subset of the generated create builder
-// enqueueAlerts needs (the concrete builder type is unexported).
-type alertOutboxInsert interface {
-	Tx() db.AlertOutboxUniqueTxResult
+	return string(rows[0].Transition)
 }
 
 const (
@@ -236,19 +162,22 @@ type pendingResult struct {
 
 // resultWriter batches monitor_results inserts. Check goroutines enqueue and
 // move on; a single flusher goroutine writes batches in one transaction per
-// flush interval instead of one round trip per check.
+// flush interval instead of one round trip per check. Every row is tagged
+// with the region this scheduler runs in.
 type resultWriter struct {
-	db   *database.Client
-	ch   chan pendingResult
-	done chan struct{}
-	once sync.Once
+	db     *database.Client
+	region string
+	ch     chan pendingResult
+	done   chan struct{}
+	once   sync.Once
 }
 
-func newResultWriter(dbc *database.Client) *resultWriter {
+func newResultWriter(dbc *database.Client, region string) *resultWriter {
 	w := &resultWriter{
-		db:   dbc,
-		ch:   make(chan pendingResult, resultBufferSize),
-		done: make(chan struct{}),
+		db:     dbc,
+		region: region,
+		ch:     make(chan pendingResult, resultBufferSize),
+		done:   make(chan struct{}),
 	}
 	go w.loop()
 	return w
@@ -323,26 +252,26 @@ func (w *resultWriter) flush(batch []pendingResult) {
 	defer cancel()
 
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO monitor_results (id, monitor_id, status, latency, status_code, message) ` +
-		`SELECT v.id, v.monitor_id, v.status::"Status", v.latency, v.status_code, v.message FROM (VALUES `)
-	params := make([]interface{}, 0, len(batch)*6)
+	sb.WriteString(`INSERT INTO monitor_results (id, monitor_id, status, latency, status_code, message, region) ` +
+		`SELECT v.id, v.monitor_id, v.status::"Status", v.latency, v.status_code, v.message, v.region FROM (VALUES `)
+	params := make([]interface{}, 0, len(batch)*7)
 	for i, p := range batch {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
 		n := len(params)
-		fmt.Fprintf(&sb, `($%d::text, $%d::text, $%d::text, $%d::int4, $%d::int4, $%d::text)`,
-			n+1, n+2, n+3, n+4, n+5, n+6)
+		fmt.Fprintf(&sb, `($%d::text, $%d::text, $%d::text, $%d::int4, $%d::int4, $%d::text, $%d::text)`,
+			n+1, n+2, n+3, n+4, n+5, n+6, n+7)
 		var statusCode interface{}
 		if p.result.StatusCode != nil {
 			statusCode = *p.result.StatusCode
 		}
 		params = append(params,
 			uuid.NewString(), p.monitorID, string(p.result.Status),
-			p.result.Latency, statusCode, p.result.Message,
+			p.result.Latency, statusCode, p.result.Message, w.region,
 		)
 	}
-	sb.WriteString(`) AS v(id, monitor_id, status, latency, status_code, message) ` +
+	sb.WriteString(`) AS v(id, monitor_id, status, latency, status_code, message, region) ` +
 		`JOIN monitors ON monitors.id = v.monitor_id`)
 
 	res, err := w.db.Prisma.Prisma.ExecuteRaw(sb.String(), params...).Exec(ctx)
@@ -367,6 +296,7 @@ type resultInsert interface {
 func (w *resultWriter) createQuery(p pendingResult) resultInsert {
 	optionalParams := []db.MonitorResultSetParam{
 		db.MonitorResult.Message.Set(p.result.Message),
+		db.MonitorResult.Region.Set(w.region),
 	}
 	if p.result.StatusCode != nil {
 		optionalParams = append(optionalParams, db.MonitorResult.StatusCode.Set(*p.result.StatusCode))

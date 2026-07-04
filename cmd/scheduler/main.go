@@ -14,6 +14,7 @@ import (
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/coordination"
 	"upguardly-backend/internal/database"
+	"upguardly-backend/internal/models"
 	"upguardly-backend/internal/scheduler"
 )
 
@@ -24,7 +25,12 @@ func main() {
 
 	cfg := config.Load()
 
+	if !models.ValidRegion(cfg.Scheduler.Region) {
+		log.Fatalf("Invalid SCHEDULER_REGION %q (known regions: %v)", cfg.Scheduler.Region, models.RegionIDs())
+	}
+
 	log.Printf("Starting scheduler instance: %s", cfg.Scheduler.InstanceID)
+	log.Printf("Region: %s", cfg.Scheduler.Region)
 	log.Printf("Partition count: %d", cfg.Scheduler.PartitionCount)
 	log.Printf("etcd endpoints: %v", cfg.Scheduler.Etcd.Endpoints)
 
@@ -38,6 +44,7 @@ func main() {
 	coordinator, err := coordination.NewCoordinator(
 		cfg.Scheduler.Etcd,
 		cfg.Scheduler.InstanceID,
+		cfg.Scheduler.Region,
 		cfg.Scheduler.LeaseTTL,
 	)
 	if err != nil {
@@ -65,6 +72,7 @@ func main() {
 		coordinator,
 		partitions,
 		cfg.Scheduler.SyncInterval,
+		cfg.Scheduler.Region,
 	)
 
 	if err := sched.Start(ctx); err != nil {

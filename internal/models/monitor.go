@@ -32,6 +32,7 @@ type Monitor struct {
 	Interval  int         `json:"interval"`
 	Timeout   int         `json:"timeout"`
 	Enabled   bool        `json:"enabled"`
+	Regions   []string    `json:"regions"`
 	CreatedAt time.Time   `json:"createdAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`
 }
@@ -46,6 +47,9 @@ type CreateMonitorRequest struct {
 	Interval int         `json:"interval"`
 	Timeout  int         `json:"timeout"`
 	Enabled  *bool       `json:"enabled"`
+	// Regions this monitor is checked from. Empty means "not provided": the
+	// handler defaults it to the default region.
+	Regions []string `json:"regions"`
 }
 
 type UpdateMonitorRequest struct {
@@ -55,6 +59,29 @@ type UpdateMonitorRequest struct {
 	Interval *int         `json:"interval"`
 	Timeout  *int         `json:"timeout"`
 	Enabled  *bool        `json:"enabled"`
+	Regions  *[]string    `json:"regions"`
+}
+
+// NormalizeRegions dedupes a region list (preserving order) and rejects ids
+// missing from the registry or an effectively empty list. Availability (is a
+// pool actually deployed?) is deployment config, checked in the handler.
+func NormalizeRegions(regions []string) ([]string, error) {
+	out := make([]string, 0, len(regions))
+	seen := make(map[string]bool, len(regions))
+	for _, r := range regions {
+		if seen[r] {
+			continue
+		}
+		if !ValidRegion(r) {
+			return nil, fmt.Errorf("unknown region %q", r)
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one region is required")
+	}
+	return out, nil
 }
 
 // SetDefaults fills plan-independent defaults. Interval is deliberately left

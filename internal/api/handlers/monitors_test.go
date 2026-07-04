@@ -128,6 +128,61 @@ func TestCreateMonitor(t *testing.T) {
 
 		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
+
+	t.Run("unspecified regions default to the platform default region", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, []string{models.DefaultRegion}, store.lastCreateRegions)
+	})
+
+	t.Run("more regions than the plan allows returns 402", func(t *testing.T) {
+		// FREE caps at 1 region.
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["na-east","eu-west"]}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("PRO plan allows multiple regions", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["na-east","eu-west"]}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, []string{"na-east", "eu-west"}, store.lastCreateRegions)
+	})
+
+	t.Run("unknown region returns 400", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["mars-north"]}`)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("duplicate regions are deduped", func(t *testing.T) {
+		// Two entries of the same region collapse to one, which FREE allows.
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["na-east","na-east"]}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, []string{"na-east"}, store.lastCreateRegions)
+	})
 }
 
 func TestListMonitors(t *testing.T) {
@@ -207,6 +262,40 @@ func TestUpdateMonitor(t *testing.T) {
 		w := doRequest(router, "PUT", "/v1/monitors/missing", `{"name":"Updated"}`)
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("regions beyond the plan cap return 402", func(t *testing.T) {
+		// FREE caps at 1 region per monitor.
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":["na-east","eu-west"]}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("regions within a PRO plan are passed to the store", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":["na-east","eu-west"]}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpdateReq)
+		require.NotNil(t, store.lastUpdateReq.Regions)
+		assert.Equal(t, []string{"na-east", "eu-west"}, *store.lastUpdateReq.Regions)
+	})
+
+	t.Run("empty regions list returns 400", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":[]}`)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 }
 

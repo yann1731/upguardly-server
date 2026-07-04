@@ -25,6 +25,11 @@ type Handlers struct {
 	mailer *mailer.Mailer
 	stripe StripeService
 
+	// availableRegions are the deployed region ids (config.AvailableRegions):
+	// what ListRegions serves and what monitor create/update validates
+	// region selections against.
+	availableRegions []string
+
 	// UserEmailLookup resolves a user's account email. EMAIL notification
 	// channels are pinned to it: the stored target is always the account
 	// email, never a caller-supplied address. Exported so tests can stub the
@@ -35,13 +40,14 @@ type Handlers struct {
 	reconciled  map[string]time.Time
 }
 
-func NewHandlers(store models.Store, m *mailer.Mailer, s StripeService) *Handlers {
+func NewHandlers(store models.Store, m *mailer.Mailer, s StripeService, availableRegions []string) *Handlers {
 	return &Handlers{
-		store:           store,
-		mailer:          m,
-		stripe:          s,
-		UserEmailLookup: supertokensUserEmail,
-		reconciled:      make(map[string]time.Time),
+		store:            store,
+		mailer:           m,
+		stripe:           s,
+		availableRegions: availableRegions,
+		UserEmailLookup:  supertokensUserEmail,
+		reconciled:       make(map[string]time.Time),
 	}
 }
 

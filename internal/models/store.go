@@ -14,14 +14,19 @@ var ErrConflict = errors.New("conflict")
 
 type Store interface {
 	// Monitors
-	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool) (*Monitor, error)
+	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool, regions []string) (*Monitor, error)
 	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
 	CountMonitorsByUser(ctx context.Context, userId string) (int, error)
 	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
 	GetMonitor(ctx context.Context, id, userId string) (*Monitor, error)
 	UpdateMonitor(ctx context.Context, id, userId string, req UpdateMonitorRequest) (*Monitor, error)
 	DeleteMonitor(ctx context.Context, id, userId string) error
-	GetMonitorResults(ctx context.Context, monitorId, userId string, limit int) ([]MonitorResult, error)
+	// GetMonitorResults returns recent results, optionally filtered to one
+	// region ("" = all regions).
+	GetMonitorResults(ctx context.Context, monitorId, userId string, limit int, region string) ([]MonitorResult, error)
+	// ListMonitorRegionStatus returns the latest per-region check outcome for
+	// the monitor's currently configured regions.
+	ListMonitorRegionStatus(ctx context.Context, monitorId, userId string) ([]MonitorRegionStatus, error)
 	ListIncidents(ctx context.Context, monitorId, userId string, limit int) ([]Incident, error)
 	GetMonitorStats(ctx context.Context, monitorId, userId string, since time.Time) (*MonitorStats, error)
 

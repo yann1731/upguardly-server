@@ -76,6 +76,18 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		return
 	}
 
+	// Regions: default to the platform default, then validate against the
+	// registry, the deployed set, and the plan's region cap.
+	if len(req.Regions) == 0 {
+		req.Regions = []string{models.DefaultRegion}
+	}
+	regions, err := h.validateRegions(req.Regions, limits)
+	if err != nil {
+		respondRegionError(c, err)
+		return
+	}
+	req.Regions = regions
+
 	// Default an unspecified interval to the plan's minimum, and enforce that
 	// minimum on explicit values. Validate() skipped the interval checks for
 	// the "not provided" case, so re-check timeout against the default here.
@@ -94,7 +106,7 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		return
 	}
 
-	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, req.Interval, req.Timeout, *req.Enabled)
+	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, req.Interval, req.Timeout, *req.Enabled, req.Regions)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})
 		return
@@ -151,7 +163,7 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 		return
 	}
 
-	if req.Name == nil && req.Type == nil && req.Target == nil && req.Interval == nil && req.Timeout == nil && req.Enabled == nil {
+	if req.Name == nil && req.Type == nil && req.Target == nil && req.Interval == nil && req.Timeout == nil && req.Enabled == nil && req.Regions == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
 		return
 	}
@@ -162,10 +174,10 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 		return
 	}
 
-	// If the interval is being changed, enforce the plan's minimum interval for
-	// the monitor's owning scope (org owner's plan for org monitors, otherwise
-	// the user's own plan).
-	if req.Interval != nil {
+	// Interval and regions are plan-gated, so changing either needs the plan
+	// of the monitor's owning scope (org owner's plan for org monitors,
+	// otherwise the user's own plan).
+	if req.Interval != nil || req.Regions != nil {
 		existing, err := h.store.GetMonitor(c.Request.Context(), id, userId)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
@@ -177,11 +189,20 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 		} else {
 			plan = h.planForUser(c.Request.Context(), userId)
 		}
-		if minInterval := models.LimitsForPlan(plan).MinInterval; *req.Interval < minInterval {
+		limits := models.LimitsForPlan(plan)
+		if req.Interval != nil && *req.Interval < limits.MinInterval {
 			c.JSON(http.StatusPaymentRequired, gin.H{
-				"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", minInterval),
+				"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", limits.MinInterval),
 			})
 			return
+		}
+		if req.Regions != nil {
+			regions, err := h.validateRegions(*req.Regions, limits)
+			if err != nil {
+				respondRegionError(c, err)
+				return
+			}
+			*req.Regions = regions
 		}
 	}
 
@@ -252,7 +273,15 @@ func (h *Handlers) GetMonitorResults(c *gin.Context) {
 		}
 	}
 
-	results, err := h.store.GetMonitorResults(c.Request.Context(), id, userId, limit)
+	// Optional per-region filter; an unknown region is a plain 400 rather
+	// than an empty 200 so typos are visible.
+	region := c.Query("region")
+	if region != "" && !models.ValidRegion(region) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unknown region %q", region)})
+		return
+	}
+
+	results, err := h.store.GetMonitorResults(c.Request.Context(), id, userId, limit, region)
 	if err != nil {
 		if errors.Is(err, models.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
