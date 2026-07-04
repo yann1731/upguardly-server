@@ -66,8 +66,25 @@ func createTestMonitor(t *testing.T, dbc *database.Client, suffix string, region
 // record drives the production recordRegionCheck path for one region.
 func record(t *testing.T, dbc *database.Client, m *db.MonitorModel, region string, result *models.CheckResult) string {
 	t.Helper()
-	r := &checkRunner{db: dbc, region: region}
-	return r.recordRegionCheck(context.Background(), m, result)
+	store := database.NewPrismaStore(dbc)
+	r := &checkRunner{store: store, region: region}
+	regions := make([]string, len(m.Regions))
+	for i, r := range m.Regions {
+		regions[i] = string(r)
+	}
+	mon := &models.Monitor{
+		ID:        m.ID,
+		Name:      m.Name,
+		Type:      models.MonitorType(m.Type),
+		Target:    m.Target,
+		Interval:  m.Interval,
+		Timeout:   m.Timeout,
+		Enabled:   m.Enabled,
+		Regions:   regions,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}
+	return r.recordRegionCheck(context.Background(), mon, result)
 }
 
 func openIncidents(t *testing.T, dbc *database.Client, monitorID string) []db.IncidentModel {
@@ -297,36 +314,37 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 
 	// Claim through the dispatcher's raw query: exercises the
 	// UPDATE ... RETURNING round trip against a function-generated row.
-	var claimed []outboxRow
-	if err := dbc.Prisma.Prisma.QueryRaw(claimQuery).Exec(ctx, &claimed); err != nil {
+	store := database.NewPrismaStore(dbc)
+	claimed, err := store.ClaimOutboxAlerts(ctx, dispatchBatchSize)
+	if err != nil {
 		t.Fatalf("claim query: %v", err)
 	}
-	var row *outboxRow
+	var row *models.AlertOutboxRow
 	for i := range claimed {
-		if claimed[i].NotificationChannelID != nil && string(*claimed[i].NotificationChannelID) == chEmail.ID {
+		if claimed[i].NotificationChannelID != nil && *claimed[i].NotificationChannelID == chEmail.ID {
 			row = &claimed[i]
 		}
 	}
 	if row == nil {
 		t.Fatalf("enqueued outbox row not claimed (got %d rows)", len(claimed))
 	}
-	if int(row.Attempts) != 1 {
-		t.Fatalf("claimed attempts = %d, want 1", int(row.Attempts))
+	if row.Attempts != 1 {
+		t.Fatalf("claimed attempts = %d, want 1", row.Attempts)
 	}
 
 	// Claimed rows must not be claimable again until their backoff elapses.
-	var again []outboxRow
-	if err := dbc.Prisma.Prisma.QueryRaw(claimQuery).Exec(ctx, &again); err != nil {
+	again, err := store.ClaimOutboxAlerts(ctx, dispatchBatchSize)
+	if err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
 	for i := range again {
-		if string(again[i].ID) == string(row.ID) {
+		if again[i].ID == row.ID {
 			t.Fatalf("row claimed twice within backoff window")
 		}
 	}
 
 	// finalize must write history and remove the row.
-	d := &alertDispatcher{db: dbc}
+	d := &alertDispatcher{store: store}
 	d.finalize(ctx, row, "delivered")
 
 	left, err := dbc.Prisma.AlertOutbox.FindMany(
@@ -417,7 +435,7 @@ func TestResultWriterBatchFlush(t *testing.T) {
 	ctx := context.Background()
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rw-%d", time.Now().UnixNano()))
 
-	w := newResultWriter(dbc, "eu-west")
+	w := newResultWriter(database.NewPrismaStore(dbc), "eu-west")
 	code := 500
 	for i := 0; i < 5; i++ {
 		w.enqueue(ctx, m.ID, &models.CheckResult{
@@ -459,7 +477,7 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rwx-%d", time.Now().UnixNano()))
 
 	hostile := `', 0, NULL, ''); DROP TABLE monitor_results; --`
-	w := newResultWriter(dbc, "na-east")
+	w := newResultWriter(database.NewPrismaStore(dbc), "na-east")
 	defer w.stop()
 	w.flush([]pendingResult{
 		{monitorID: m.ID, result: models.CheckResult{Status: models.StatusUP, Latency: 12, Message: hostile}},

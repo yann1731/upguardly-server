@@ -7,8 +7,7 @@ import (
 	"time"
 
 	"upguardly-backend/internal/alerter"
-	"upguardly-backend/internal/database"
-	db "upguardly-backend/internal/database/prisma"
+	"upguardly-backend/internal/models"
 )
 
 // job tracks one running monitor goroutine. updatedAt is the monitor's
@@ -23,7 +22,7 @@ type job struct {
 // Scheduler is the embedded single-process scheduler used by cmd/server for
 // one-box deployments. It checks every enabled monitor in-process.
 type Scheduler struct {
-	db       *database.Client
+	store    models.SchedulerStore
 	region   string
 	runner   *checkRunner
 	jobs     map[string]*job
@@ -32,11 +31,11 @@ type Scheduler struct {
 	stopOnce sync.Once
 }
 
-func NewScheduler(dbc *database.Client, alertManager *alerter.Manager, region string) *Scheduler {
+func NewScheduler(store models.SchedulerStore, alertManager *alerter.Manager, region string) *Scheduler {
 	return &Scheduler{
-		db:     dbc,
+		store:  store,
 		region: region,
-		runner: newCheckRunner(dbc, alertManager, region),
+		runner: newCheckRunner(store, alertManager, region),
 		jobs:   make(map[string]*job),
 		stopCh: make(chan struct{}),
 	}
@@ -66,11 +65,7 @@ func (s *Scheduler) syncLoop(ctx context.Context) {
 }
 
 func (s *Scheduler) syncMonitors(ctx context.Context) {
-	monitors, err := s.db.Prisma.Monitor.FindMany(
-		db.Monitor.Enabled.Equals(true),
-		db.Monitor.Regions.Has(s.region),
-	).Exec(ctx)
-
+	monitors, err := s.store.FetchActiveMonitors(ctx, s.region)
 	if err != nil {
 		log.Printf("Failed to fetch monitors: %v", err)
 		return
@@ -95,7 +90,7 @@ func (s *Scheduler) syncMonitors(ctx context.Context) {
 
 // reconcileJob ensures a job is running for m with its current config,
 // restarting it when the monitor row changed since the job started.
-func (s *Scheduler) reconcileJob(ctx context.Context, m *db.MonitorModel) {
+func (s *Scheduler) reconcileJob(ctx context.Context, m *models.Monitor) {
 	s.mu.RLock()
 	j, exists := s.jobs[m.ID]
 	s.mu.RUnlock()
@@ -111,7 +106,7 @@ func (s *Scheduler) reconcileJob(ctx context.Context, m *db.MonitorModel) {
 	s.startMonitorJob(ctx, m)
 }
 
-func (s *Scheduler) startMonitorJob(parentCtx context.Context, m *db.MonitorModel) {
+func (s *Scheduler) startMonitorJob(parentCtx context.Context, m *models.Monitor) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s.mu.Lock()

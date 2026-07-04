@@ -2,21 +2,17 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/coordination"
-	"upguardly-backend/internal/database"
-	db "upguardly-backend/internal/database/prisma"
+	"upguardly-backend/internal/models"
 )
 
 type DistributedScheduler struct {
-	db           *database.Client
+	store        models.SchedulerStore
 	region       string
 	runner       *checkRunner
 	coordinator  *coordination.Coordinator
@@ -31,7 +27,7 @@ type DistributedScheduler struct {
 }
 
 func NewDistributedScheduler(
-	dbc *database.Client,
+	store models.SchedulerStore,
 	alertManager *alerter.Manager,
 	coordinator *coordination.Coordinator,
 	partitions *coordination.PartitionManager,
@@ -39,9 +35,9 @@ func NewDistributedScheduler(
 	region string,
 ) *DistributedScheduler {
 	return &DistributedScheduler{
-		db:           dbc,
+		store:        store,
 		region:       region,
-		runner:       newCheckRunner(dbc, alertManager, region),
+		runner:       newCheckRunner(store, alertManager, region),
 		coordinator:  coordinator,
 		partitions:   partitions,
 		syncInterval: syncInterval,
@@ -138,7 +134,7 @@ func (s *DistributedScheduler) stopJobsForPartitions(partitions []int) {
 // region and fall in partitions this instance owns. Both filters run in SQL
 // (see PartitionSQLExpr), so each instance's sync cost scales with the
 // monitors it owns rather than every instance scanning the entire table.
-func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.MonitorModel, error) {
+func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]models.Monitor, error) {
 	owned := s.partitions.GetOwnedPartitions()
 	if len(owned) == 0 {
 		return nil, nil
@@ -146,66 +142,10 @@ func (s *DistributedScheduler) fetchOwnedMonitors(ctx context.Context) ([]db.Mon
 
 	// Owning everything (e.g. a single instance): a plain query is cheaper.
 	if len(owned) == s.partitions.PartitionCount() {
-		return s.db.Prisma.Monitor.FindMany(
-			db.Monitor.Enabled.Equals(true),
-			db.Monitor.Regions.Has(s.region),
-		).Exec(ctx)
+		return s.store.FetchActiveMonitors(ctx, s.region)
 	}
 
-	ids := make([]string, len(owned))
-	for i, p := range owned {
-		ids[i] = strconv.Itoa(p)
-	}
-
-	// Identifiers and the IN list are internally generated integers/constants,
-	// never user input, so string assembly is safe here; the region is a
-	// bound parameter.
-	query := fmt.Sprintf(
-		`SELECT id, user_id AS "userId", org_id AS "orgId", name, type, target,
-		        "interval", timeout, enabled, regions, created_at AS "createdAt", updated_at AS "updatedAt"
-		 FROM monitors
-		 WHERE enabled = true AND $1 = ANY(regions) AND %s IN (%s)`,
-		s.partitions.PartitionSQLExpr(),
-		strings.Join(ids, ","),
-	)
-
-	var raws []db.RawMonitorModel
-	if err := s.db.Prisma.Prisma.QueryRaw(query, s.region).Exec(ctx, &raws); err != nil {
-		return nil, err
-	}
-
-	monitors := make([]db.MonitorModel, len(raws))
-	for i := range raws {
-		monitors[i] = rawToMonitor(&raws[i])
-	}
-	return monitors, nil
-}
-
-func rawToMonitor(r *db.RawMonitorModel) db.MonitorModel {
-	regions := make([]string, len(r.Regions))
-	for i, reg := range r.Regions {
-		regions[i] = string(reg)
-	}
-	m := db.MonitorModel{
-		InnerMonitor: db.InnerMonitor{
-			ID:        string(r.ID),
-			UserID:    string(r.UserID),
-			Name:      string(r.Name),
-			Type:      db.MonitorType(r.Type),
-			Target:    string(r.Target),
-			Interval:  int(r.Interval),
-			Timeout:   int(r.Timeout),
-			Enabled:   bool(r.Enabled),
-			Regions:   regions,
-			CreatedAt: r.CreatedAt.Time,
-			UpdatedAt: r.UpdatedAt.Time,
-		},
-	}
-	if r.OrgID != nil {
-		v := string(*r.OrgID)
-		m.InnerMonitor.OrgID = &v
-	}
-	return m
+	return s.store.FetchOwnedMonitors(ctx, s.region, owned, s.partitions.PartitionSQLExpr())
 }
 
 func (s *DistributedScheduler) syncMonitors(ctx context.Context) {
@@ -240,7 +180,7 @@ func (s *DistributedScheduler) syncMonitors(ctx context.Context) {
 
 // reconcileJob ensures a job is running for m with its current config,
 // restarting it when the monitor row changed since the job started.
-func (s *DistributedScheduler) reconcileJob(ctx context.Context, m *db.MonitorModel) {
+func (s *DistributedScheduler) reconcileJob(ctx context.Context, m *models.Monitor) {
 	s.mu.RLock()
 	j, exists := s.jobs[m.ID]
 	s.mu.RUnlock()
@@ -256,7 +196,7 @@ func (s *DistributedScheduler) reconcileJob(ctx context.Context, m *db.MonitorMo
 	s.startMonitorJob(ctx, m)
 }
 
-func (s *DistributedScheduler) startMonitorJob(parentCtx context.Context, m *db.MonitorModel) {
+func (s *DistributedScheduler) startMonitorJob(parentCtx context.Context, m *models.Monitor) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s.mu.Lock()

@@ -70,3 +70,12 @@ type Store interface {
 	// plan change. Returns the number of monitors adjusted.
 	ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan, newPlan string) (int, error)
 }
+
+type SchedulerStore interface {
+	FetchActiveMonitors(ctx context.Context, region string) ([]Monitor, error)
+	FetchOwnedMonitors(ctx context.Context, region string, ownedPartitions []int, partitionSQLExpr string) ([]Monitor, error)
+	RecordRegionCheck(ctx context.Context, monitorID, region string, result *CheckResult) (string, error)
+	PersistMonitorResults(ctx context.Context, region string, results []PendingResult) error
+	ClaimOutboxAlerts(ctx context.Context, limit int) ([]AlertOutboxRow, error)
+	FinalizeOutboxAlert(ctx context.Context, id string, status Status, message string, alertID, notificationChannelID *string) error
+}

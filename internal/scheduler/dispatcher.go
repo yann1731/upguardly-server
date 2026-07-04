@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"upguardly-backend/internal/alerter"
-	"upguardly-backend/internal/database"
-	db "upguardly-backend/internal/database/prisma"
 	"upguardly-backend/internal/metrics"
 	"upguardly-backend/internal/models"
 )
@@ -34,16 +32,16 @@ const (
 // the row on success, and otherwise leaves it to retry with exponential
 // backoff. A provider outage therefore delays alerts instead of losing them.
 type alertDispatcher struct {
-	db           *database.Client
+	store        models.SchedulerStore
 	alertManager *alerter.Manager
 	stopCh       chan struct{}
 	doneCh       chan struct{}
 	once         sync.Once
 }
 
-func newAlertDispatcher(dbc *database.Client, alertManager *alerter.Manager) *alertDispatcher {
+func newAlertDispatcher(store models.SchedulerStore, alertManager *alerter.Manager) *alertDispatcher {
 	d := &alertDispatcher{
-		db:           dbc,
+		store:        store,
 		alertManager: alertManager,
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
@@ -85,56 +83,14 @@ func (d *alertDispatcher) loop() {
 	}
 }
 
-// outboxRow mirrors the RETURNING clause of the claim query. Raw scalar types
-// unmarshal the query-engine's JSON encoding. Exactly one of AlertID /
-// NotificationChannelID is set (DB CHECK constraint) — the row's source.
-type outboxRow struct {
-	ID                    db.RawString  `json:"id"`
-	AlertID               *db.RawString `json:"alertId"`
-	NotificationChannelID *db.RawString `json:"notificationChannelId"`
-	MonitorID             db.RawString  `json:"monitorId"`
-	Channel               db.RawString  `json:"channel"`
-	Target                db.RawString  `json:"target"`
-	Status                db.RawString  `json:"status"`
-	Message               db.RawString  `json:"message"`
-	StatusCode            *db.RawInt    `json:"statusCode"`
-	Latency               db.RawInt     `json:"latency"`
-	MonitorName           db.RawString  `json:"monitorName"`
-	MonitorType           db.RawString  `json:"monitorType"`
-	MonitorTarget         db.RawString  `json:"monitorTarget"`
-	Attempts              db.RawInt     `json:"attempts"`
-}
-
-// claimQuery atomically claims up to dispatchBatchSize due rows: attempts is
-// bumped and next_attempt_at pushed out (30s * 2^attempts, capped at 30m)
-// BEFORE delivery is attempted, so rows claimed by a dispatcher that crashes
-// mid-send retry automatically after the backoff. SKIP LOCKED keeps
-// concurrent dispatchers from claiming the same rows.
-var claimQuery = fmt.Sprintf(`
-UPDATE alert_outbox
-SET attempts = attempts + 1,
-    next_attempt_at = now() + least(interval '30 seconds' * (2 ^ attempts), interval '30 minutes')
-WHERE id IN (
-    SELECT id FROM alert_outbox
-    WHERE next_attempt_at <= now()
-    ORDER BY next_attempt_at
-    LIMIT %d
-    FOR UPDATE SKIP LOCKED
-)
-RETURNING id, alert_id AS "alertId", notification_channel_id AS "notificationChannelId",
-          monitor_id AS "monitorId", channel, target,
-          status, message, status_code AS "statusCode", latency,
-          monitor_name AS "monitorName", monitor_type AS "monitorType",
-          monitor_target AS "monitorTarget", attempts`, dispatchBatchSize)
-
 // dispatchBatch claims and processes one batch, returning how many rows it
 // claimed.
 func (d *alertDispatcher) dispatchBatch() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	var rows []outboxRow
-	if err := d.db.Prisma.Prisma.QueryRaw(claimQuery).Exec(ctx, &rows); err != nil {
+	rows, err := d.store.ClaimOutboxAlerts(ctx, dispatchBatchSize)
+	if err != nil {
 		log.Printf("Failed to claim alert outbox rows: %v", err)
 		return 0
 	}
@@ -146,7 +102,7 @@ func (d *alertDispatcher) dispatchBatch() int {
 	for i := range rows {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(row *outboxRow) {
+		go func(row *models.AlertOutboxRow) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			d.deliver(ctx, row)
@@ -157,25 +113,22 @@ func (d *alertDispatcher) dispatchBatch() int {
 	return len(rows)
 }
 
-func (d *alertDispatcher) deliver(ctx context.Context, row *outboxRow) {
+func (d *alertDispatcher) deliver(ctx context.Context, row *models.AlertOutboxRow) {
 	mon := &models.Monitor{
-		ID:     string(row.MonitorID),
-		Name:   string(row.MonitorName),
-		Type:   models.MonitorType(row.MonitorType),
-		Target: string(row.MonitorTarget),
+		ID:     row.MonitorID,
+		Name:   row.MonitorName,
+		Type:   row.MonitorType,
+		Target: row.MonitorTarget,
 	}
 	result := &models.CheckResult{
-		Status:  models.Status(row.Status),
-		Latency: int(row.Latency),
-		Message: string(row.Message),
-	}
-	if row.StatusCode != nil {
-		code := int(*row.StatusCode)
-		result.StatusCode = &code
+		Status:     row.Status,
+		Latency:    row.Latency,
+		StatusCode: row.StatusCode,
+		Message:    row.Message,
 	}
 
 	sendCtx, cancel := context.WithTimeout(ctx, dispatchSendTimeout)
-	err := d.alertManager.Send(sendCtx, models.AlertChannel(row.Channel), string(row.Target), mon, result)
+	err := d.alertManager.Send(sendCtx, row.Channel, row.Target, mon, result)
 	cancel()
 
 	switch {
@@ -184,7 +137,7 @@ func (d *alertDispatcher) deliver(ctx context.Context, row *outboxRow) {
 		metrics.AlertsSentTotal.WithLabelValues(mon.ID, mon.Name, string(row.Channel), string(result.Status)).Inc()
 		d.finalize(ctx, row, result.Message)
 
-	case int(row.Attempts) >= dispatchMaxAttempts:
+	case row.Attempts >= dispatchMaxAttempts:
 		log.Printf("Giving up on %s alert for %s after %d attempts: %v", row.Channel, mon.Name, row.Attempts, err)
 		d.finalize(ctx, row, fmt.Sprintf("delivery failed after %d attempts: %v", row.Attempts, err))
 
@@ -196,29 +149,9 @@ func (d *alertDispatcher) deliver(ctx context.Context, row *outboxRow) {
 }
 
 // finalize records the outcome in alert_history and removes the outbox row.
-func (d *alertDispatcher) finalize(ctx context.Context, row *outboxRow, historyMessage string) {
-	// Link the history row to the outbox row's source: a per-monitor alert or
-	// a global notification channel.
-	var source db.AlertHistorySetParam
-	switch {
-	case row.AlertID != nil:
-		source = db.AlertHistory.Alert.Link(db.Alert.ID.Equals(string(*row.AlertID)))
-	case row.NotificationChannelID != nil:
-		source = db.AlertHistory.NotificationChannel.Link(db.NotificationChannel.ID.Equals(string(*row.NotificationChannelID)))
-	}
-	if source == nil {
-		log.Printf("Outbox row %s has no source; skipping history", row.ID)
-	} else if _, err := d.db.Prisma.AlertHistory.CreateOne(
-		db.AlertHistory.Status.Set(db.Status(row.Status)),
-		db.AlertHistory.Message.Set(historyMessage),
-		source,
-	).Exec(ctx); err != nil {
-		log.Printf("Failed to save alert history: %v", err)
-	}
-
-	if _, err := d.db.Prisma.AlertOutbox.FindUnique(
-		db.AlertOutbox.ID.Equals(string(row.ID)),
-	).Delete().Exec(ctx); err != nil {
-		log.Printf("Failed to delete outbox row %s: %v", row.ID, err)
+func (d *alertDispatcher) finalize(ctx context.Context, row *models.AlertOutboxRow, historyMessage string) {
+	err := d.store.FinalizeOutboxAlert(ctx, row.ID, row.Status, historyMessage, row.AlertID, row.NotificationChannelID)
+	if err != nil {
+		log.Printf("Failed to finalize outbox row %s: %v", row.ID, err)
 	}
 }

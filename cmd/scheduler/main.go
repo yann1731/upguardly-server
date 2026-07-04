@@ -13,7 +13,7 @@ import (
 	"upguardly-backend/internal/alerter"
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/coordination"
-	"upguardly-backend/internal/database"
+	bundb "upguardly-backend/internal/database/bun"
 	"upguardly-backend/internal/models"
 	"upguardly-backend/internal/scheduler"
 )
@@ -34,12 +34,14 @@ func main() {
 	log.Printf("Partition count: %d", cfg.Scheduler.PartitionCount)
 	log.Printf("etcd endpoints: %v", cfg.Scheduler.Etcd.Endpoints)
 
-	db := database.NewClient()
+	db := bundb.NewClient(cfg.DatabaseURL)
 	if err := db.Connect(); err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		log.Fatalf("Failed to connect to Bun database: %v", err)
 	}
 	defer db.Disconnect()
-	log.Println("Connected to PostgreSQL database")
+	log.Println("Connected to PostgreSQL database (via Bun)")
+
+	store := bundb.NewBunStore(db)
 
 	coordinator, err := coordination.NewCoordinator(
 		cfg.Scheduler.Etcd,
@@ -67,7 +69,7 @@ func main() {
 	alertManager := alerter.NewManager(cfg)
 
 	sched := scheduler.NewDistributedScheduler(
-		db,
+		store,
 		alertManager,
 		coordinator,
 		partitions,

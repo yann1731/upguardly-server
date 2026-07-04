@@ -16,7 +16,7 @@ import (
 	"upguardly-backend/internal/api/middleware"
 	"upguardly-backend/internal/auth"
 	"upguardly-backend/internal/config"
-	"upguardly-backend/internal/database"
+	bundb "upguardly-backend/internal/database/bun"
 	"upguardly-backend/internal/mailer"
 	"upguardly-backend/internal/redisclient"
 	"upguardly-backend/internal/scheduler"
@@ -37,13 +37,13 @@ func main() {
 	}
 	log.Println("SuperTokens initialized")
 
-	db := database.NewClient()
+	db := bundb.NewClient(cfg.DatabaseURL)
 	if err := db.Connect(); err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		log.Fatalf("Failed to connect to Bun database: %v", err)
 	}
 	defer db.Disconnect()
 
-	log.Println("Connected to database")
+	log.Println("Connected to Bun database")
 
 	// Configure the rate limiters from env before the router serves traffic.
 	middleware.InitRateLimiters(cfg.RateLimit.DefaultPerMin, cfg.RateLimit.StrictPerMin, cfg.RateLimit.Window)
@@ -76,13 +76,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	store := bundb.NewBunStore(db)
+
 	// The embedded scheduler checks every monitor in-process. It is intended
 	// only for single-box deployments. When the API server is scaled to more
 	// than one replica, or a dedicated cmd/scheduler is running, this MUST be
 	// disabled (EMBEDDED_SCHEDULER=false) to avoid duplicate checks and alerts.
 	var sched *scheduler.Scheduler
 	if cfg.Scheduler.Embedded {
-		sched = scheduler.NewScheduler(db, alertManager, cfg.Scheduler.Region)
+		sched = scheduler.NewScheduler(store, alertManager, cfg.Scheduler.Region)
 		if err := sched.Start(ctx); err != nil {
 			log.Fatalf("Failed to start scheduler: %v", err)
 		}
@@ -91,7 +93,6 @@ func main() {
 		log.Println("Embedded scheduler disabled — relying on dedicated scheduler instance(s)")
 	}
 
-	store := database.NewPrismaStore(db)
 	s := stripeservice.NewClient(cfg.Stripe)
 	router := api.NewRouter(store, cfg.SuperTokens.WebsiteDomain, m, s, cfg.AvailableRegions)
 
