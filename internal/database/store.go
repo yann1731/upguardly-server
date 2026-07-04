@@ -188,6 +188,88 @@ func (s *PrismaStore) DeleteMonitor(ctx context.Context, id, userId string) erro
 	return err
 }
 
+// planScopeSQL selects the monitors governed by $1's plan: their solo
+// monitors plus every monitor of an organization they own (org monitors
+// follow the org owner's plan, regardless of which member created them).
+const planScopeSQL = `((user_id = $1 AND org_id IS NULL)
+	OR org_id IN (SELECT id FROM organizations WHERE owner_id = $1))`
+
+// ReconcileMonitorsToPlan snaps the monitors governed by a user's plan to the
+// limits of the plan they just moved to. Callers invoke it only after the
+// effective plan actually changed — a scheduled cancellation keeps its paid
+// plan until Stripe ends the period, so any grace has already lapsed here.
+//
+//   - Downgrade: intervals faster than the new plan's minimum are raised to
+//     it, and region lists longer than the new cap are trimmed to their first
+//     N entries.
+//   - Upgrade: intervals sitting exactly at the old plan's minimum (the
+//     default every UI-created monitor gets) are lowered to the new minimum,
+//     so the faster checks the plan advertises apply to existing monitors
+//     too. Explicitly slower intervals are user choices and are kept, as is
+//     any interval the monitor's timeout wouldn't fit under.
+//
+// updated_at is bumped so running schedulers restart the affected jobs with
+// the new config on their next sync tick. Returns the number of monitors
+// adjusted.
+func (s *PrismaStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan, newPlan string) (int, error) {
+	oldLimits := models.LimitsForPlan(oldPlan)
+	newLimits := models.LimitsForPlan(newPlan)
+	total := 0
+
+	if newLimits.MinInterval > oldLimits.MinInterval {
+		res, err := s.client.Prisma.Prisma.ExecuteRaw(
+			`UPDATE monitors SET interval = $2, updated_at = now()
+			  WHERE `+planScopeSQL+` AND interval < $2`,
+			userId, newLimits.MinInterval,
+		).Exec(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += res.Count
+	} else if newLimits.MinInterval < oldLimits.MinInterval {
+		res, err := s.client.Prisma.Prisma.ExecuteRaw(
+			`UPDATE monitors SET interval = $2, updated_at = now()
+			  WHERE `+planScopeSQL+` AND interval = $3 AND timeout < $2`,
+			userId, newLimits.MinInterval, oldLimits.MinInterval,
+		).Exec(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += res.Count
+	}
+
+	if newLimits.MaxRegions != models.Unlimited {
+		res, err := s.client.Prisma.Prisma.ExecuteRaw(
+			`UPDATE monitors SET regions = regions[1:($2::int)], updated_at = now()
+			  WHERE `+planScopeSQL+` AND cardinality(regions) > $2`,
+			userId, newLimits.MaxRegions,
+		).Exec(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += res.Count
+
+		// Best-effort cleanup of status rows for regions just trimmed off, as
+		// UpdateMonitor does: quorum and the region-status endpoint filter to
+		// the configured list, so a failure here is cosmetic.
+		if res.Count > 0 {
+			if _, err := s.client.Prisma.Prisma.ExecuteRaw(
+				`DELETE FROM monitor_region_status mrs
+				  USING monitors m
+				  WHERE mrs.monitor_id = m.id
+				    AND ((m.user_id = $1 AND m.org_id IS NULL)
+				         OR m.org_id IN (SELECT id FROM organizations WHERE owner_id = $1))
+				    AND NOT (mrs.region = ANY(m.regions))`,
+				userId,
+			).Exec(ctx); err != nil {
+				log.Printf("Failed to clean up region status rows for user %s: %v", userId, err)
+			}
+		}
+	}
+
+	return total, nil
+}
+
 func (s *PrismaStore) GetMonitorResults(ctx context.Context, monitorId, userId string, limit int, region string) ([]models.MonitorResult, error) {
 	if _, err := s.client.Prisma.Monitor.FindFirst(
 		db.Monitor.ID.Equals(monitorId),

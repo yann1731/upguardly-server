@@ -339,6 +339,136 @@ func TestStripeWebhook(t *testing.T) {
 		assert.Equal(t, "CANCELED", store.lastUpsertSub.Status)
 	})
 
+	t.Run("subscription.deleted reconciles monitors to FREE", func(t *testing.T) {
+		// The deleted webhook is where a scheduled cancellation actually
+		// lands (Stripe fires it when the paid period ends) — this is the
+		// moment existing monitors must be snapped to FREE limits.
+		store := &mockStore{subResult: aSubscription("PRO")}
+		fs := &fakeStripe{
+			event: stripe.Event{
+				Type: "customer.subscription.deleted",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSON("price_pro"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastReconcile)
+		assert.Equal(t, testUserID, store.lastReconcile.UserID)
+		assert.Equal(t, "PRO", store.lastReconcile.OldPlan)
+		assert.Equal(t, "FREE", store.lastReconcile.NewPlan)
+	})
+
+	t.Run("subscription.updated upgrade reconciles monitors to the paid plan", func(t *testing.T) {
+		store := &mockStore{} // no record yet → effective FREE
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			event: stripe.Event{
+				Type: "customer.subscription.updated",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSON("price_pro"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastReconcile)
+		assert.Equal(t, "FREE", store.lastReconcile.OldPlan)
+		assert.Equal(t, "PRO", store.lastReconcile.NewPlan)
+	})
+
+	t.Run("scheduling a cancel does not reconcile (grace until period end)", func(t *testing.T) {
+		// Cancelling at period end fires subscription.updated with the plan
+		// still active — the effective plan is unchanged until the deleted
+		// event lands, so monitors must keep their paid intervals.
+		store := &mockStore{subResult: aSubscription("PRO")}
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			event: stripe.Event{
+				Type: "customer.subscription.updated",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSON("price_pro"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Nil(t, store.lastReconcile, "same effective plan must not touch monitors")
+	})
+
+	t.Run("unpaid on a paid record reconciles monitors to FREE", func(t *testing.T) {
+		// "unpaid" maps to CANCELED and Stripe never emits a deleted event
+		// for it, so this webhook is also the enforcement point.
+		store := &mockStore{subResult: aSubscription("PRO")}
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			event: stripe.Event{
+				Type: "customer.subscription.updated",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSONWithStatus("price_pro", "unpaid"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastReconcile)
+		assert.Equal(t, "PRO", store.lastReconcile.OldPlan)
+		assert.Equal(t, "FREE", store.lastReconcile.NewPlan)
+	})
+
+	t.Run("payment failure keeps the plan and does not reconcile", func(t *testing.T) {
+		// PAST_DUE is a grace status: entitlement (and monitors) unchanged
+		// while Stripe retries the payment.
+		store := &mockStore{subResult: aSubscription("PRO")}
+		fs := &fakeStripe{
+			event: stripe.Event{
+				Type: "invoice.payment_failed",
+				Data: &stripe.EventData{Raw: json.RawMessage(`{
+					"customer": {"id": "cus_1", "metadata": {"user_id": "test-user-id"}},
+					"subscription": {"id": "sub_1"}
+				}`)},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
+		assert.Equal(t, "PAST_DUE", store.lastUpsertSub.Status)
+		assert.Nil(t, store.lastReconcile)
+	})
+
+	t.Run("stale-record reconcile against Stripe also reconciles monitors", func(t *testing.T) {
+		// GetSubscription healing a missed deleted-webhook (paid record, no
+		// live Stripe subscription) is the third enforcement point.
+		sub := aSubscription("PRO")
+		cust := "cus_1"
+		sub.StripeCustomerID = &cust
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{activeSub: nil} // Stripe has no live subscription
+		router, h := newOrgRouter(store, fs)
+		router.GET("/v1/organizations/:id/subscription", h.GetSubscription)
+
+		w := doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastReconcile)
+		assert.Equal(t, "PRO", store.lastReconcile.OldPlan)
+		assert.Equal(t, "FREE", store.lastReconcile.NewPlan)
+	})
+
 	t.Run("unrecognised price id is ignored without upsert", func(t *testing.T) {
 		store := &mockStore{}
 		fs := &fakeStripe{
