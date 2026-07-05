@@ -12,3 +12,20 @@ const (
 	AlertChannelSLACK    AlertChannel = "SLACK"
 	AlertChannelTELEGRAM AlertChannel = "TELEGRAM"
 )
+
+type AlertOutboxRow struct {
+	ID                    string
+	AlertID               *string
+	NotificationChannelID *string
+	MonitorID             string
+	Channel               AlertChannel
+	Target                string
+	Status                Status
+	Message               string
+	StatusCode            *int
+	Latency               int
+	MonitorName           string
+	MonitorType           MonitorType
+	MonitorTarget         string
+	Attempts              int
+}

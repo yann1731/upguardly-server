@@ -167,9 +167,25 @@ jobs:
             cd /opt/upguardly/staging
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
             sed -i "s|^SERVER_IMAGE_TAG=.*|SERVER_IMAGE_TAG=${{ github.sha }}|" .env
-            # --ignore-buildable skips the locally-built db image (pgBackRest);
-            # --build (re)builds it on the host before starting.
+            # docker-rollout: zero-downtime replace (start new replica, wait for
+            # its healthcheck, then stop the old one). Installed on first deploy.
+            if [ ! -x ~/.docker/cli-plugins/docker-rollout ]; then
+              mkdir -p ~/.docker/cli-plugins
+              curl -fsSL https://raw.githubusercontent.com/wowu/docker-rollout/v0.13/docker-rollout -o ~/.docker/cli-plugins/docker-rollout
+              chmod +x ~/.docker/cli-plugins/docker-rollout
+            fi
+            # --ignore-buildable skips the locally-built db image (pgBackRest).
             docker compose pull --ignore-buildable
+            # Apply migrations BEFORE rolling the code: the old replica keeps
+            # serving against the new schema during the swap, which is safe as
+            # long as migrations follow expand/contract (docs/runbooks/migrations.md).
+            # A failed migration aborts the deploy with the old code still up.
+            docker compose run --rm migrate
+            # Roll the API without dropping requests; Caddy retries onto the new
+            # replica (lb_try_duration in the Caddyfile).
+            docker rollout server
+            # Reconcile everything else (scheduler, db image rebuild, migrate
+            # service record). Scheduler restarts stop-start — not user-facing.
             docker compose up -d --build --remove-orphans
             # Health-check in-container: server no longer publishes a host port
             # (Caddy fronts everything).
@@ -198,9 +214,25 @@ jobs:
             cd /opt/upguardly/production
             echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
             sed -i "s|^SERVER_IMAGE_TAG=.*|SERVER_IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
-            # --ignore-buildable skips the locally-built db image (pgBackRest);
-            # --build (re)builds it on the host before starting.
+            # docker-rollout: zero-downtime replace (start new replica, wait for
+            # its healthcheck, then stop the old one). Installed on first deploy.
+            if [ ! -x ~/.docker/cli-plugins/docker-rollout ]; then
+              mkdir -p ~/.docker/cli-plugins
+              curl -fsSL https://raw.githubusercontent.com/wowu/docker-rollout/v0.13/docker-rollout -o ~/.docker/cli-plugins/docker-rollout
+              chmod +x ~/.docker/cli-plugins/docker-rollout
+            fi
+            # --ignore-buildable skips the locally-built db image (pgBackRest).
             docker compose pull --ignore-buildable
+            # Apply migrations BEFORE rolling the code: the old replica keeps
+            # serving against the new schema during the swap, which is safe as
+            # long as migrations follow expand/contract (docs/runbooks/migrations.md).
+            # A failed migration aborts the deploy with the old code still up.
+            docker compose run --rm migrate
+            # Roll the API without dropping requests; Caddy retries onto the new
+            # replica (lb_try_duration in the Caddyfile).
+            docker rollout server
+            # Reconcile everything else (scheduler, db image rebuild, migrate
+            # service record). Scheduler restarts stop-start — not user-facing.
             docker compose up -d --build --remove-orphans
             # Health-check in-container: server no longer publishes a host port
             # (Caddy fronts everything).

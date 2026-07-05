@@ -20,12 +20,12 @@ import (
 	"testing"
 	"time"
 
-	"upguardly-backend/internal/database"
-	db "upguardly-backend/internal/database/prisma"
+	"github.com/google/uuid"
+	bundb "upguardly-backend/internal/database/bun"
 	"upguardly-backend/internal/models"
 )
 
-func integrationDB(t *testing.T) *database.Client {
+func integrationDB(t *testing.T) *bundb.Client {
 	t.Helper()
 	url := os.Getenv("SCHEDULER_TEST_DATABASE_URL")
 	if url == "" {
@@ -33,7 +33,7 @@ func integrationDB(t *testing.T) *database.Client {
 	}
 	os.Setenv("DATABASE_URL", url)
 
-	client := database.NewClient()
+	client := bundb.NewClient(url)
 	if err := client.Connect(); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -41,41 +41,63 @@ func integrationDB(t *testing.T) *database.Client {
 	return client
 }
 
-func createTestMonitor(t *testing.T, dbc *database.Client, suffix string, regions ...string) *db.MonitorModel {
+func createTestMonitor(t *testing.T, dbc *bundb.Client, suffix string, regions ...string) *models.Monitor {
 	t.Helper()
 	ctx := context.Background()
 	if len(regions) == 0 {
 		regions = []string{"na-east"}
 	}
-	m, err := dbc.Prisma.Monitor.CreateOne(
-		db.Monitor.UserID.Set("it-user"),
-		db.Monitor.Name.Set("it-monitor-"+suffix),
-		db.Monitor.Type.Set(db.MonitorTypeHTTP),
-		db.Monitor.Target.Set("https://example.com"),
-		db.Monitor.Regions.Set(regions),
-	).Exec(ctx)
-	if err != nil {
+	m := &bundb.Monitor{
+		ID:        uuid.NewString(),
+		UserID:    "it-user",
+		Name:      "it-monitor-" + suffix,
+		Type:      string(models.MonitorTypeHTTP),
+		Target:    "https://example.com",
+		Interval:  60,
+		Timeout:   30,
+		Enabled:   true,
+		Regions:   regions,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(m).Exec(ctx); err != nil {
 		t.Fatalf("create monitor: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = dbc.Prisma.Monitor.FindUnique(db.Monitor.ID.Equals(m.ID)).Delete().Exec(ctx)
+		_, _ = dbc.DB.NewDelete().Table("monitors").Where("id = ?", m.ID).Exec(ctx)
 	})
-	return m
+
+	return &models.Monitor{
+		ID:        m.ID,
+		OrgID:     m.OrgID,
+		Name:      m.Name,
+		Type:      models.MonitorType(m.Type),
+		Target:    m.Target,
+		Interval:  m.Interval,
+		Timeout:   m.Timeout,
+		Enabled:   m.Enabled,
+		Regions:   m.Regions,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}
 }
 
 // record drives the production recordRegionCheck path for one region.
-func record(t *testing.T, dbc *database.Client, m *db.MonitorModel, region string, result *models.CheckResult) string {
+func record(t *testing.T, dbc *bundb.Client, m *models.Monitor, region string, result *models.CheckResult) string {
 	t.Helper()
-	r := &checkRunner{db: dbc, region: region}
+	store := bundb.NewBunStore(dbc)
+	r := &checkRunner{store: store, region: region}
 	return r.recordRegionCheck(context.Background(), m, result)
 }
 
-func openIncidents(t *testing.T, dbc *database.Client, monitorID string) []db.IncidentModel {
+func openIncidents(t *testing.T, dbc *bundb.Client, monitorID string) []bundb.Incident {
 	t.Helper()
-	open, err := dbc.Prisma.Incident.FindMany(
-		db.Incident.MonitorID.Equals(monitorID),
-		db.Incident.ResolvedAt.IsNull(),
-	).Exec(context.Background())
+	var open []bundb.Incident
+	err := dbc.DB.NewSelect().
+		Model(&open).
+		Where("monitor_id = ?", monitorID).
+		Where("resolved_at IS NULL").
+		Scan(context.Background())
 	if err != nil {
 		t.Fatalf("list incidents: %v", err)
 	}
@@ -126,7 +148,7 @@ func TestRegionCheckSingleRegionTransitions(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("open incidents = %d, want 1", len(open))
 	}
-	if open[0].Status != db.StatusDown {
+	if open[0].Status != string(models.StatusDOWN) {
 		t.Fatalf("incident status = %s, want DOWN (worst seen)", open[0].Status)
 	}
 }
@@ -156,9 +178,9 @@ func TestRegionCheckQuorum(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("open incidents = %d, want 1", len(open))
 	}
-	msg, _ := open[0].Message()
-	if !strings.Contains(msg, "eu-west") || !strings.Contains(msg, "na-east") || !strings.Contains(msg, "2/3") {
-		t.Fatalf("incident message %q should name both failing regions and the 2/3 count", msg)
+	msg := open[0].Message
+	if msg == nil || !strings.Contains(*msg, "eu-west") || !strings.Contains(*msg, "na-east") || !strings.Contains(*msg, "2/3") {
+		t.Fatalf("incident message %v should name both failing regions and the 2/3 count", msg)
 	}
 
 	// The healthy third region reporting again must not resolve anything.
@@ -193,9 +215,9 @@ func TestRegionCheckStaleRegionIgnored(t *testing.T) {
 
 	// eu-west's pool dies: its DOWN row goes stale (interval is 60s, so 1h is
 	// far past the 180s freshness window).
-	if _, err := dbc.Prisma.Prisma.ExecuteRaw(
+	if _, err := dbc.DB.NewRaw(
 		`UPDATE monitor_region_status SET checked_at = now() - interval '1 hour'
-		  WHERE monitor_id = $1 AND region = 'eu-west'`, m.ID,
+		  WHERE monitor_id = ? AND region = 'eu-west'`, m.ID,
 	).Exec(ctx); err != nil {
 		t.Fatalf("backdate region status: %v", err)
 	}
@@ -222,125 +244,159 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 	// A unique owner per run: channels are per-user, so reusing "it-user"
 	// would leak channels between runs.
 	owner := fmt.Sprintf("it-user-ob-%d", time.Now().UnixNano())
-	m, err := dbc.Prisma.Monitor.CreateOne(
-		db.Monitor.UserID.Set(owner),
-		db.Monitor.Name.Set("it-monitor-ob"),
-		db.Monitor.Type.Set(db.MonitorTypeHTTP),
-		db.Monitor.Target.Set("https://example.com"),
-		db.Monitor.Regions.Set([]string{"na-east"}),
-	).Exec(ctx)
-	if err != nil {
+	m := &bundb.Monitor{
+		ID:        uuid.NewString(),
+		UserID:    owner,
+		Name:      "it-monitor-ob",
+		Type:      string(models.MonitorTypeHTTP),
+		Target:    "https://example.com",
+		Interval:  60,
+		Timeout:   30,
+		Enabled:   true,
+		Regions:   []string{"na-east"},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(m).Exec(ctx); err != nil {
 		t.Fatalf("create monitor: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = dbc.Prisma.Monitor.FindUnique(db.Monitor.ID.Equals(m.ID)).Delete().Exec(ctx)
+		_, _ = dbc.DB.NewDelete().Table("monitors").Where("id = ?", m.ID).Exec(ctx)
 	})
 
-	newChannel := func(user string, channel db.AlertChannel, target string) *db.NotificationChannelModel {
-		ch, err := dbc.Prisma.NotificationChannel.CreateOne(
-			db.NotificationChannel.UserID.Set(user),
-			db.NotificationChannel.Channel.Set(channel),
-			db.NotificationChannel.Target.Set(target),
-			db.NotificationChannel.Enabled.Set(true),
-		).Exec(ctx)
-		if err != nil {
+	newChannel := func(user string, channel string, target string) *bundb.NotificationChannel {
+		ch := &bundb.NotificationChannel{
+			ID:        uuid.NewString(),
+			UserID:    user,
+			Channel:   channel,
+			Target:    target,
+			Enabled:   true,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if _, err := dbc.DB.NewInsert().Model(ch).Exec(ctx); err != nil {
 			t.Fatalf("create channel: %v", err)
 		}
 		t.Cleanup(func() {
-			_, _ = dbc.Prisma.NotificationChannel.FindUnique(db.NotificationChannel.ID.Equals(ch.ID)).Delete().Exec(ctx)
+			_, _ = dbc.DB.NewDelete().Table("notification_channels").Where("id = ?", ch.ID).Exec(ctx)
 		})
 		return ch
 	}
 
-	chEmail := newChannel(owner, db.AlertChannelEmail, "it@example.com")
-	chDiscord := newChannel(owner, db.AlertChannelDiscord, "https://discord.example.com/webhook")
+	chEmail := newChannel(owner, string(models.AlertChannelEMAIL), "it@example.com")
+	chDiscord := newChannel(owner, string(models.AlertChannelDISCORD), "https://discord.example.com/webhook")
 
 	// Opt the monitor out of the Discord channel.
-	if _, err := dbc.Prisma.MonitorChannelSetting.CreateOne(
-		db.MonitorChannelSetting.Monitor.Link(db.Monitor.ID.Equals(m.ID)),
-		db.MonitorChannelSetting.NotificationChannel.Link(db.NotificationChannel.ID.Equals(chDiscord.ID)),
-		db.MonitorChannelSetting.Enabled.Set(false),
-	).Exec(ctx); err != nil {
+	setting := &bundb.MonitorChannelSetting{
+		ID:                    uuid.NewString(),
+		MonitorID:             m.ID,
+		NotificationChannelID: chDiscord.ID,
+		Enabled:               false,
+		CreatedAt:             time.Now(),
+		UpdatedAt:             time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(setting).Exec(ctx); err != nil {
 		t.Fatalf("create channel setting: %v", err)
 	}
 
 	code := 503
-	if got := record(t, dbc, m, "na-east", &models.CheckResult{
+	monModel := &models.Monitor{
+		ID:        m.ID,
+		OrgID:     m.OrgID,
+		Name:      m.Name,
+		Type:      models.MonitorType(m.Type),
+		Target:    m.Target,
+		Interval:  m.Interval,
+		Timeout:   m.Timeout,
+		Enabled:   m.Enabled,
+		Regions:   m.Regions,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}
+	if got := record(t, dbc, monModel, "na-east", &models.CheckResult{
 		Status: models.StatusDOWN, Latency: 42, Message: "Server error", StatusCode: &code,
 	}); got != "opened" {
 		t.Fatalf("open: got %q, want opened", got)
 	}
 
-	rows, err := dbc.Prisma.AlertOutbox.FindMany(
-		db.AlertOutbox.MonitorID.Equals(m.ID),
-	).Exec(ctx)
+	var rows []bundb.AlertOutbox
+	err := dbc.DB.NewSelect().
+		Model(&rows).
+		Where("monitor_id = ?", m.ID).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list outbox: %v", err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("outbox rows = %d, want 1 (email inherited, discord opted out)", len(rows))
 	}
-	if chID, ok := rows[0].NotificationChannelID(); !ok || chID != chEmail.ID {
-		t.Fatalf("row channel link = %v/%v, want %s", chID, ok, chEmail.ID)
+	if rows[0].NotificationChannelID == nil || *rows[0].NotificationChannelID != chEmail.ID {
+		t.Fatalf("row channel link = %v, want %s", rows[0].NotificationChannelID, chEmail.ID)
 	}
-	if _, ok := rows[0].AlertID(); ok {
+	if rows[0].AlertID != nil {
 		t.Fatalf("global-channel row must have NULL alert_id")
 	}
-	if rows[0].Target != "it@example.com" || rows[0].Status != db.StatusDown ||
-		rows[0].MonitorName != m.Name || rows[0].MonitorType != db.MonitorTypeHTTP ||
+	if rows[0].Target != "it@example.com" || rows[0].Status != string(models.StatusDOWN) ||
+		rows[0].MonitorName != m.Name || rows[0].MonitorType != m.Type ||
 		rows[0].MonitorTarget != m.Target || rows[0].Latency != 42 {
 		t.Fatalf("outbox denormalized fields wrong: %+v", rows[0])
 	}
-	if sc, ok := rows[0].StatusCode(); !ok || sc != 503 {
-		t.Fatalf("status code = %v/%v, want 503", sc, ok)
+	if rows[0].StatusCode == nil || *rows[0].StatusCode != 503 {
+		t.Fatalf("status code = %v, want 503", rows[0].StatusCode)
 	}
 
 	// Claim through the dispatcher's raw query: exercises the
 	// UPDATE ... RETURNING round trip against a function-generated row.
-	var claimed []outboxRow
-	if err := dbc.Prisma.Prisma.QueryRaw(claimQuery).Exec(ctx, &claimed); err != nil {
+	store := bundb.NewBunStore(dbc)
+	claimed, err := store.ClaimOutboxAlerts(ctx, dispatchBatchSize)
+	if err != nil {
 		t.Fatalf("claim query: %v", err)
 	}
-	var row *outboxRow
+	var row *models.AlertOutboxRow
 	for i := range claimed {
-		if claimed[i].NotificationChannelID != nil && string(*claimed[i].NotificationChannelID) == chEmail.ID {
+		if claimed[i].NotificationChannelID != nil && *claimed[i].NotificationChannelID == chEmail.ID {
 			row = &claimed[i]
 		}
 	}
 	if row == nil {
 		t.Fatalf("enqueued outbox row not claimed (got %d rows)", len(claimed))
 	}
-	if int(row.Attempts) != 1 {
-		t.Fatalf("claimed attempts = %d, want 1", int(row.Attempts))
+	if row.Attempts != 1 {
+		t.Fatalf("claimed attempts = %d, want 1", row.Attempts)
 	}
 
 	// Claimed rows must not be claimable again until their backoff elapses.
-	var again []outboxRow
-	if err := dbc.Prisma.Prisma.QueryRaw(claimQuery).Exec(ctx, &again); err != nil {
+	again, err := store.ClaimOutboxAlerts(ctx, dispatchBatchSize)
+	if err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
 	for i := range again {
-		if string(again[i].ID) == string(row.ID) {
+		if again[i].ID == row.ID {
 			t.Fatalf("row claimed twice within backoff window")
 		}
 	}
 
 	// finalize must write history and remove the row.
-	d := &alertDispatcher{db: dbc}
+	d := &alertDispatcher{store: store}
 	d.finalize(ctx, row, "delivered")
 
-	left, err := dbc.Prisma.AlertOutbox.FindMany(
-		db.AlertOutbox.NotificationChannelID.Equals(chEmail.ID),
-	).Exec(ctx)
+	var left []bundb.AlertOutbox
+	err = dbc.DB.NewSelect().
+		Model(&left).
+		Where("notification_channel_id = ?", chEmail.ID).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list outbox: %v", err)
 	}
 	if len(left) != 0 {
 		t.Fatalf("outbox rows left = %d, want 0", len(left))
 	}
-	hist, err := dbc.Prisma.AlertHistory.FindMany(
-		db.AlertHistory.NotificationChannelID.Equals(chEmail.ID),
-	).Exec(ctx)
+
+	var hist []bundb.AlertHistory
+	err = dbc.DB.NewSelect().
+		Model(&hist).
+		Where("notification_channel_id = ?", chEmail.ID).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list history: %v", err)
 	}
@@ -349,15 +405,17 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 	}
 
 	// Recovery enqueues an UP row with the recovering check's message.
-	if got := record(t, dbc, m, "na-east", &models.CheckResult{
+	if got := record(t, dbc, monModel, "na-east", &models.CheckResult{
 		Status: models.StatusUP, Latency: 10, Message: "OK",
 	}); got != "resolved" {
 		t.Fatalf("resolve: got %q, want resolved", got)
 	}
-	upRows, err := dbc.Prisma.AlertOutbox.FindMany(
-		db.AlertOutbox.MonitorID.Equals(m.ID),
-		db.AlertOutbox.Status.Equals(db.StatusUp),
-	).Exec(ctx)
+	var upRows []bundb.AlertOutbox
+	err = dbc.DB.NewSelect().
+		Model(&upRows).
+		Where("monitor_id = ?", m.ID).
+		Where("status = ?", string(models.StatusUP)).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list recovery outbox: %v", err)
 	}
@@ -367,48 +425,73 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 
 	// Org monitor: channels resolve via the org owner, not the creator.
 	orgOwner := owner + "-orgowner"
-	chOrg := newChannel(orgOwner, db.AlertChannelSlack, "https://slack.example.com/hook")
-	org, err := dbc.Prisma.Organization.CreateOne(
-		db.Organization.Name.Set(fmt.Sprintf("it-org-%d", time.Now().UnixNano())),
-		db.Organization.OwnerID.Set(orgOwner),
-	).Exec(ctx)
-	if err != nil {
+	chOrg := newChannel(orgOwner, string(models.AlertChannelSLACK), "https://slack.example.com/hook")
+	org := &bundb.Organization{
+		ID:        uuid.NewString(),
+		Name:      fmt.Sprintf("it-org-%d", time.Now().UnixNano()),
+		OwnerID:   orgOwner,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(org).Exec(ctx); err != nil {
 		t.Fatalf("create org: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = dbc.Prisma.Organization.FindUnique(db.Organization.ID.Equals(org.ID)).Delete().Exec(ctx)
+		_, _ = dbc.DB.NewDelete().Table("organizations").Where("id = ?", org.ID).Exec(ctx)
 	})
-	orgMon, err := dbc.Prisma.Monitor.CreateOne(
-		db.Monitor.UserID.Set(owner+"-creator"),
-		db.Monitor.Name.Set("it-monitor-org"),
-		db.Monitor.Type.Set(db.MonitorTypeHTTP),
-		db.Monitor.Target.Set("https://example.com"),
-		db.Monitor.Regions.Set([]string{"na-east"}),
-		db.Monitor.Org.Link(db.Organization.ID.Equals(org.ID)),
-	).Exec(ctx)
-	if err != nil {
+	orgMon := &bundb.Monitor{
+		ID:        uuid.NewString(),
+		UserID:    owner + "-creator",
+		Name:      "it-monitor-org",
+		Type:      string(models.MonitorTypeHTTP),
+		Target:    "https://example.com",
+		Regions:   []string{"na-east"},
+		OrgID:     &org.ID,
+		Interval:  60,
+		Timeout:   30,
+		Enabled:   true,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(orgMon).Exec(ctx); err != nil {
 		t.Fatalf("create org monitor: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = dbc.Prisma.Monitor.FindUnique(db.Monitor.ID.Equals(orgMon.ID)).Delete().Exec(ctx)
+		_, _ = dbc.DB.NewDelete().Table("monitors").Where("id = ?", orgMon.ID).Exec(ctx)
 	})
 
-	if got := record(t, dbc, orgMon, "na-east", &models.CheckResult{
+	orgMonModel := &models.Monitor{
+		ID:        orgMon.ID,
+		OrgID:     orgMon.OrgID,
+		Name:      orgMon.Name,
+		Type:      models.MonitorType(orgMon.Type),
+		Target:    orgMon.Target,
+		Interval:  orgMon.Interval,
+		Timeout:   orgMon.Timeout,
+		Enabled:   orgMon.Enabled,
+		Regions:   orgMon.Regions,
+		CreatedAt: orgMon.CreatedAt,
+		UpdatedAt: orgMon.UpdatedAt,
+	}
+
+	if got := record(t, dbc, orgMonModel, "na-east", &models.CheckResult{
 		Status: models.StatusDOWN, Message: "down",
 	}); got != "opened" {
 		t.Fatalf("org open: got %q, want opened", got)
 	}
-	orgRows, err := dbc.Prisma.AlertOutbox.FindMany(
-		db.AlertOutbox.MonitorID.Equals(orgMon.ID),
-	).Exec(ctx)
+	var orgRows []bundb.AlertOutbox
+	err = dbc.DB.NewSelect().
+		Model(&orgRows).
+		Where("monitor_id = ?", orgMon.ID).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list org outbox: %v", err)
 	}
 	if len(orgRows) != 1 {
 		t.Fatalf("org outbox rows = %d, want 1", len(orgRows))
 	}
-	if chID, ok := orgRows[0].NotificationChannelID(); !ok || chID != chOrg.ID {
-		t.Fatalf("org row channel = %v/%v, want org owner's channel %s", chID, ok, chOrg.ID)
+	if orgRows[0].NotificationChannelID == nil || *orgRows[0].NotificationChannelID != chOrg.ID {
+		t.Fatalf("org row channel = %v, want org owner's channel %s", orgRows[0].NotificationChannelID, chOrg.ID)
 	}
 }
 
@@ -417,7 +500,7 @@ func TestResultWriterBatchFlush(t *testing.T) {
 	ctx := context.Background()
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rw-%d", time.Now().UnixNano()))
 
-	w := newResultWriter(dbc, "eu-west")
+	w := newResultWriter(bundb.NewBunStore(dbc), "eu-west")
 	code := 500
 	for i := 0; i < 5; i++ {
 		w.enqueue(ctx, m.ID, &models.CheckResult{
@@ -429,17 +512,19 @@ func TestResultWriterBatchFlush(t *testing.T) {
 	}
 	w.stop() // drains and flushes
 
-	rows, err := dbc.Prisma.MonitorResult.FindMany(
-		db.MonitorResult.MonitorID.Equals(m.ID),
-	).Exec(ctx)
+	var rows []bundb.MonitorResult
+	err := dbc.DB.NewSelect().
+		Model(&rows).
+		Where("monitor_id = ?", m.ID).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list results: %v", err)
 	}
 	if len(rows) != 5 {
 		t.Fatalf("results = %d, want 5", len(rows))
 	}
-	if sc, ok := rows[0].StatusCode(); !ok || sc != 500 {
-		t.Fatalf("status code = %v/%v, want 500", sc, ok)
+	if rows[0].StatusCode == nil || *rows[0].StatusCode != 500 {
+		t.Fatalf("status code = %v, want 500", rows[0].StatusCode)
 	}
 	for _, row := range rows {
 		if row.Region != "eu-west" {
@@ -459,30 +544,32 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rwx-%d", time.Now().UnixNano()))
 
 	hostile := `', 0, NULL, ''); DROP TABLE monitor_results; --`
-	w := newResultWriter(dbc, "na-east")
+	w := newResultWriter(bundb.NewBunStore(dbc), "na-east")
 	defer w.stop()
 	w.flush([]pendingResult{
 		{monitorID: m.ID, result: models.CheckResult{Status: models.StatusUP, Latency: 12, Message: hostile}},
 		{monitorID: "no-such-monitor", result: models.CheckResult{Status: models.StatusUP, Latency: 1}},
 	})
 
-	rows, err := dbc.Prisma.MonitorResult.FindMany(
-		db.MonitorResult.MonitorID.Equals(m.ID),
-	).Exec(ctx)
+	var rows []bundb.MonitorResult
+	err := dbc.DB.NewSelect().
+		Model(&rows).
+		Where("monitor_id = ?", m.ID).
+		Scan(ctx)
 	if err != nil {
 		t.Fatalf("list results: %v", err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("results = %d, want 1", len(rows))
 	}
-	if _, ok := rows[0].StatusCode(); ok {
+	if rows[0].StatusCode != nil {
 		t.Fatalf("status code should be NULL")
 	}
-	if rows[0].Status != db.StatusUp {
+	if rows[0].Status != string(models.StatusUP) {
 		t.Fatalf("status = %s, want UP", rows[0].Status)
 	}
-	if msg, ok := rows[0].Message(); !ok || msg != hostile {
-		t.Fatalf("message = %q/%v, want the raw payload stored verbatim", msg, ok)
+	if rows[0].Message == nil || *rows[0].Message != hostile {
+		t.Fatalf("message = %v, want the raw payload stored verbatim", rows[0].Message)
 	}
 	if rows[0].Region != "na-east" {
 		t.Fatalf("region = %q, want na-east", rows[0].Region)

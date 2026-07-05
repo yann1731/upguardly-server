@@ -2,18 +2,12 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"math/rand"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"upguardly-backend/internal/alerter"
-	"upguardly-backend/internal/database"
-	db "upguardly-backend/internal/database/prisma"
 	"upguardly-backend/internal/metrics"
 	"upguardly-backend/internal/models"
 	"upguardly-backend/internal/monitor"
@@ -25,18 +19,18 @@ import (
 // monitor's updatedAt changes, so the loop never has to re-read config from
 // the database.
 type checkRunner struct {
-	db         *database.Client
+	store      models.SchedulerStore
 	region     string
 	results    *resultWriter
 	dispatcher *alertDispatcher
 }
 
-func newCheckRunner(dbc *database.Client, alertManager *alerter.Manager, region string) *checkRunner {
+func newCheckRunner(store models.SchedulerStore, alertManager *alerter.Manager, region string) *checkRunner {
 	return &checkRunner{
-		db:         dbc,
+		store:      store,
 		region:     region,
-		results:    newResultWriter(dbc, region),
-		dispatcher: newAlertDispatcher(dbc, alertManager),
+		results:    newResultWriter(store, region),
+		dispatcher: newAlertDispatcher(store, alertManager),
 	}
 }
 
@@ -52,7 +46,7 @@ func (r *checkRunner) stop() {
 // runs immediately; the loop then re-phases by a one-time random offset so
 // jobs started in the same sync tick (e.g. all of them, after a restart)
 // don't hit their targets and the database in lockstep forever.
-func (r *checkRunner) jobLoop(ctx context.Context, m *db.MonitorModel) {
+func (r *checkRunner) jobLoop(ctx context.Context, m *models.Monitor) {
 	r.runCheck(ctx, m)
 
 	interval := time.Duration(m.Interval) * time.Second
@@ -81,8 +75,8 @@ func (r *checkRunner) jobLoop(ctx context.Context, m *db.MonitorModel) {
 	}
 }
 
-func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel) {
-	checker := monitor.NewChecker(models.MonitorType(m.Type))
+func (r *checkRunner) runCheck(ctx context.Context, m *models.Monitor) {
+	checker := monitor.NewChecker(m.Type)
 	if checker == nil {
 		log.Printf("Unknown monitor type: %s", m.Type)
 		return
@@ -104,45 +98,20 @@ func (r *checkRunner) runCheck(ctx context.Context, m *db.MonitorModel) {
 	log.Printf("Monitor %s [%s]: %s (latency: %dms)", m.Name, r.region, result.Status, result.Latency)
 }
 
-// regionCheckRow is the result of maintenance.record_region_check.
-type regionCheckRow struct {
-	Transition db.RawString  `json:"transition"`
-	IncidentID *db.RawString `json:"incidentId"`
-}
-
 // recordRegionCheck reports this region's check outcome to Postgres and
 // returns the incident transition it caused ("none", "opened", "escalated",
 // "resolved"). Everything stateful lives in maintenance.record_region_check
 // (migration 20260703120000_add_regions): it upserts this region's row,
 // evaluates majority quorum across the monitor's configured regions under a
 // per-monitor advisory lock, transitions the global incident, and enqueues
-// alert_outbox rows in the same transaction. This replaced the in-memory
-// incidentTracker and Go-side enqueueAlerts/effectiveGlobalChannels: with
-// multiple regions checking the same monitor there is no single writer any
-// more, so the serialization has to live in the database.
-//
-// On error we only log: the next check retries, which is the same recovery
-// semantics the tracker had (a DB error meant "stay unloaded; retry").
-func (r *checkRunner) recordRegionCheck(ctx context.Context, m *db.MonitorModel, result *models.CheckResult) string {
-	var statusCode interface{}
-	if result.StatusCode != nil {
-		statusCode = *result.StatusCode
-	}
-
-	var rows []regionCheckRow
-	err := r.db.Prisma.Prisma.QueryRaw(
-		`SELECT transition, incident_id AS "incidentId"
-		   FROM maintenance.record_region_check($1::text, $2::text, $3::"Status", $4::int4, $5::int4, $6::text)`,
-		m.ID, r.region, string(result.Status), result.Latency, statusCode, result.Message,
-	).Exec(ctx, &rows)
+// alert_outbox rows in the same transaction.
+func (r *checkRunner) recordRegionCheck(ctx context.Context, m *models.Monitor, result *models.CheckResult) string {
+	transition, err := r.store.RecordRegionCheck(ctx, m.ID, r.region, result)
 	if err != nil {
 		log.Printf("Failed to record region check for %s: %v", m.ID, err)
 		return "none"
 	}
-	if len(rows) == 0 {
-		return "none"
-	}
-	return string(rows[0].Transition)
+	return transition
 }
 
 const (
@@ -165,16 +134,16 @@ type pendingResult struct {
 // flush interval instead of one round trip per check. Every row is tagged
 // with the region this scheduler runs in.
 type resultWriter struct {
-	db     *database.Client
+	store  models.SchedulerStore
 	region string
 	ch     chan pendingResult
 	done   chan struct{}
 	once   sync.Once
 }
 
-func newResultWriter(dbc *database.Client, region string) *resultWriter {
+func newResultWriter(store models.SchedulerStore, region string) *resultWriter {
 	w := &resultWriter{
-		db:     dbc,
+		store:  store,
 		region: region,
 		ch:     make(chan pendingResult, resultBufferSize),
 		done:   make(chan struct{}),
@@ -234,13 +203,6 @@ func (w *resultWriter) loop() {
 	}
 }
 
-// flush writes the batch as one multi-row INSERT via ExecuteRaw. The
-// generated CreateOne path costs a full query-engine round trip (protocol
-// parse, plan, relation connect) per row, and that engine work — not
-// Postgres — dominates backend CPU at high check volume. IDs are generated
-// here because the cuid default lives in the Prisma client, not the DB.
-// The join against monitors drops rows whose monitor was deleted between
-// check and flush, which would otherwise fail the whole statement on FK.
 func (w *resultWriter) flush(batch []pendingResult) {
 	if len(batch) == 0 {
 		return
@@ -251,67 +213,27 @@ func (w *resultWriter) flush(batch []pendingResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var sb strings.Builder
-	sb.WriteString(`INSERT INTO monitor_results (id, monitor_id, status, latency, status_code, message, region) ` +
-		`SELECT v.id, v.monitor_id, v.status::"Status", v.latency, v.status_code, v.message, v.region FROM (VALUES `)
-	params := make([]interface{}, 0, len(batch)*7)
-	for i, p := range batch {
-		if i > 0 {
-			sb.WriteString(", ")
+	results := make([]models.PendingResult, len(batch))
+	for i, b := range batch {
+		results[i] = models.PendingResult{
+			MonitorID: b.monitorID,
+			Result:    b.result,
 		}
-		n := len(params)
-		fmt.Fprintf(&sb, `($%d::text, $%d::text, $%d::text, $%d::int4, $%d::int4, $%d::text, $%d::text)`,
-			n+1, n+2, n+3, n+4, n+5, n+6, n+7)
-		var statusCode interface{}
-		if p.result.StatusCode != nil {
-			statusCode = *p.result.StatusCode
-		}
-		params = append(params,
-			uuid.NewString(), p.monitorID, string(p.result.Status),
-			p.result.Latency, statusCode, p.result.Message, w.region,
-		)
-	}
-	sb.WriteString(`) AS v(id, monitor_id, status, latency, status_code, message, region) ` +
-		`JOIN monitors ON monitors.id = v.monitor_id`)
-
-	res, err := w.db.Prisma.Prisma.ExecuteRaw(sb.String(), params...).Exec(ctx)
-	if err != nil {
-		log.Printf("Batch result insert failed (%d rows), retrying individually: %v", len(batch), err)
-		for _, p := range batch {
-			w.insertOne(ctx, p)
-		}
-		return
-	}
-	if res.Count < len(batch) {
-		log.Printf("Batch result insert skipped %d of %d rows (monitor deleted)", len(batch)-res.Count, len(batch))
-	}
-}
-
-// resultInsert is the subset of the generated create builder the writer
-// needs (the concrete builder type is unexported).
-type resultInsert interface {
-	Exec(ctx context.Context) (*db.MonitorResultModel, error)
-}
-
-func (w *resultWriter) createQuery(p pendingResult) resultInsert {
-	optionalParams := []db.MonitorResultSetParam{
-		db.MonitorResult.Message.Set(p.result.Message),
-		db.MonitorResult.Region.Set(w.region),
-	}
-	if p.result.StatusCode != nil {
-		optionalParams = append(optionalParams, db.MonitorResult.StatusCode.Set(*p.result.StatusCode))
 	}
 
-	return w.db.Prisma.MonitorResult.CreateOne(
-		db.MonitorResult.Monitor.Link(db.Monitor.ID.Equals(p.monitorID)),
-		db.MonitorResult.Status.Set(db.Status(p.result.Status)),
-		db.MonitorResult.Latency.Set(p.result.Latency),
-		optionalParams...,
-	)
+	if err := w.store.PersistMonitorResults(ctx, w.region, results); err != nil {
+		log.Printf("Failed to persist monitor results (%d rows), error: %v", len(batch), err)
+	}
 }
 
 func (w *resultWriter) insertOne(ctx context.Context, p pendingResult) {
-	if _, err := w.createQuery(p).Exec(ctx); err != nil {
+	results := []models.PendingResult{
+		{
+			MonitorID: p.monitorID,
+			Result:    p.result,
+		},
+	}
+	if err := w.store.PersistMonitorResults(ctx, w.region, results); err != nil {
 		log.Printf("Failed to save monitor result for %s: %v", p.monitorID, err)
 	}
 }

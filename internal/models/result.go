@@ -35,3 +35,8 @@ type CheckResult struct {
 	StatusCode *int
 	Message    string
 }
+
+type PendingResult struct {
+	MonitorID string
+	Result    CheckResult
+}

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,6 +56,40 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 	c.JSON(http.StatusOK, sub)
 }
 
+// syncSubscription persists a subscription change and, when it moves the
+// user's effective plan, snaps their existing monitors to the new plan's
+// limits (ReconcileMonitorsToPlan). Every write that can change entitlement
+// must go through here rather than calling UpsertSubscription directly.
+//
+// Grace is preserved upstream: a scheduled cancellation keeps status ACTIVE —
+// and therefore its effective plan — until Stripe ends the billing period, so
+// by the time a write lands here with a lower plan, the downgrade is due.
+func (h *Handlers) syncSubscription(ctx context.Context, params models.UpsertSubscriptionParams) (*models.Subscription, error) {
+	// Missing/unreadable record resolves to FREE, same as planForUser.
+	prev, err := h.store.GetSubscriptionByUser(ctx, params.UserID)
+	if err != nil {
+		prev = nil
+	}
+
+	updated, err := h.store.UpsertSubscription(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	oldPlan, newPlan := effectivePlan(prev), effectivePlan(updated)
+	if oldPlan != newPlan {
+		// The subscription write already succeeded; a reconcile failure must
+		// not fail the caller (webhooks would be retried as if unprocessed).
+		// Interval/region gates on monitor create/update still hold the line.
+		if n, rerr := h.store.ReconcileMonitorsToPlan(ctx, params.UserID, oldPlan, newPlan); rerr != nil {
+			log.Printf("subscription: failed to reconcile monitors for user %s (%s -> %s): %v", params.UserID, oldPlan, newPlan, rerr)
+		} else if n > 0 {
+			log.Printf("subscription: user %s moved %s -> %s, adjusted %d monitor(s)", params.UserID, oldPlan, newPlan, n)
+		}
+	}
+	return updated, nil
+}
+
 // reconcileSubscription refreshes the user's subscription from Stripe's live
 // state and returns the up-to-date model, or nil when reconciliation is not
 // possible (caller should fall back to the DB record or a default free plan).
@@ -85,7 +120,7 @@ func (h *Handlers) reconcileSubscription(c *gin.Context, userID string, dbSub *m
 	if stripeSub == nil {
 		// No subscription at Stripe: downgrade a stale paid record to FREE.
 		if dbSub != nil && dbSub.Plan != "FREE" {
-			updated, upErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+			updated, upErr := h.syncSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
 				UserID: userID,
 				Plan:   "FREE",
 				Status: "CANCELED",
@@ -102,7 +137,7 @@ func (h *Handlers) reconcileSubscription(c *gin.Context, userID string, dbSub *m
 	if err != nil {
 		return nil // unrecognised price — leave the DB record untouched
 	}
-	updated, err := h.store.UpsertSubscription(c.Request.Context(), params)
+	updated, err := h.syncSubscription(c.Request.Context(), params)
 	if err != nil {
 		return nil
 	}
@@ -380,7 +415,7 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	if _, upsertErr := h.store.UpsertSubscription(c.Request.Context(), params); upsertErr != nil {
+	if _, upsertErr := h.syncSubscription(c.Request.Context(), params); upsertErr != nil {
 		log.Printf("stripe webhook: failed to upsert subscription for user %s: %v", userID, upsertErr)
 	}
 
@@ -400,7 +435,7 @@ func (h *Handlers) handleSubscriptionDeleted(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	_, err := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+	_, err := h.syncSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
 		UserID: userID,
 		Plan:   "FREE",
 		Status: "CANCELED",
@@ -438,7 +473,7 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		existingPlan = sub.Plan
 	}
 
-	_, err := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+	_, err := h.syncSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
 		UserID: userID,
 		Plan:   existingPlan,
 		Status: "PAST_DUE",

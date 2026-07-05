@@ -65,4 +65,17 @@ type Store interface {
 	// Subscriptions (keyed on the user — the billing subject)
 	GetSubscriptionByUser(ctx context.Context, userId string) (*Subscription, error)
 	UpsertSubscription(ctx context.Context, params UpsertSubscriptionParams) (*Subscription, error)
+	// ReconcileMonitorsToPlan snaps the monitors governed by the user's plan
+	// (solo + owned-org monitors) to the new plan's limits after an effective
+	// plan change. Returns the number of monitors adjusted.
+	ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan, newPlan string) (int, error)
+}
+
+type SchedulerStore interface {
+	FetchActiveMonitors(ctx context.Context, region string) ([]Monitor, error)
+	FetchOwnedMonitors(ctx context.Context, region string, ownedPartitions []int, partitionSQLExpr string) ([]Monitor, error)
+	RecordRegionCheck(ctx context.Context, monitorID, region string, result *CheckResult) (string, error)
+	PersistMonitorResults(ctx context.Context, region string, results []PendingResult) error
+	ClaimOutboxAlerts(ctx context.Context, limit int) ([]AlertOutboxRow, error)
+	FinalizeOutboxAlert(ctx context.Context, id string, status Status, message string, alertID, notificationChannelID *string) error
 }

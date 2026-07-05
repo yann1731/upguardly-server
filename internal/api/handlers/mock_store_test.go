@@ -58,6 +58,8 @@ type mockStore struct {
 	subResult        *models.Subscription
 	subErr           error
 	deleteOrgErr     error
+	reconcileCount   int
+	reconcileErr     error
 
 	// region status return values
 	regionStatusResult []models.MonitorRegionStatus
@@ -74,6 +76,14 @@ type mockStore struct {
 	lastChannelCreateChannel string
 	lastChannelCreateTarget  string
 	lastChannelUpdate        *models.UpdateNotificationChannelRequest
+	lastReconcile            *reconcileCall
+}
+
+// reconcileCall captures one ReconcileMonitorsToPlan invocation.
+type reconcileCall struct {
+	UserID  string
+	OldPlan string
+	NewPlan string
 }
 
 func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval, _ int, _ bool, regions []string) (*models.Monitor, error) {
@@ -216,7 +226,26 @@ func (m *mockStore) GetSubscriptionByUser(_ context.Context, _ string) (*models.
 }
 func (m *mockStore) UpsertSubscription(_ context.Context, params models.UpsertSubscriptionParams) (*models.Subscription, error) {
 	m.lastUpsertSub = &params
-	return m.subResult, m.subErr
+	if m.subErr != nil {
+		return nil, m.subErr
+	}
+	// Mirror the real store: the returned record reflects the written params
+	// (syncSubscription derives the new effective plan from it).
+	return &models.Subscription{
+		ID:                   "sub-1",
+		UserID:               params.UserID,
+		Plan:                 params.Plan,
+		Status:               params.Status,
+		StripeCustomerID:     params.StripeCustomerID,
+		StripeSubscriptionID: params.StripeSubscriptionID,
+		StripePriceID:        params.StripePriceID,
+		CurrentPeriodStart:   params.CurrentPeriodStart,
+		CurrentPeriodEnd:     params.CurrentPeriodEnd,
+	}, nil
+}
+func (m *mockStore) ReconcileMonitorsToPlan(_ context.Context, userId, oldPlan, newPlan string) (int, error) {
+	m.lastReconcile = &reconcileCall{UserID: userId, OldPlan: oldPlan, NewPlan: newPlan}
+	return m.reconcileCount, m.reconcileErr
 }
 
 const testOrgID = "test-org-id"

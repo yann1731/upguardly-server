@@ -8,14 +8,19 @@ type PlanLimits struct {
 	MaxGlobalChannels int
 	// MinInterval is the smallest allowed check interval (in seconds) for the
 	// plan. Lower tiers are throttled to longer intervals to bound load.
+	// Enforced at configuration time and re-applied to existing monitors
+	// whenever the effective plan changes (ReconcileMonitorsToPlan): a
+	// scheduled cancellation keeps its paid plan — and its intervals — until
+	// Stripe ends the billing period, and only then are monitors clamped.
 	MinInterval int
 	// AllowedChannels lists the alert channels the plan may configure.
 	// Enforced only at configuration time: channels created before a
 	// downgrade keep delivering (grace), the user just can't add more.
 	AllowedChannels []AlertChannel
 	// MaxRegions caps how many regions a single monitor may be checked from.
-	// Like AllowedChannels this is enforced at configuration time only:
-	// monitors configured before a downgrade keep their regions.
+	// Enforced at configuration time and, like MinInterval, re-applied when
+	// the effective plan changes: once a downgrade lands (after the paid
+	// period ends), region lists over the cap are trimmed.
 	MaxRegions int
 }
 
