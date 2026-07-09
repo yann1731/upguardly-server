@@ -16,6 +16,7 @@ import (
 	"github.com/stripe/stripe-go/v76"
 
 	"upguardly-backend/internal/api/middleware"
+	"upguardly-backend/internal/metrics"
 	"upguardly-backend/internal/models"
 )
 
@@ -82,7 +83,11 @@ func (h *Handlers) syncSubscription(ctx context.Context, params models.UpsertSub
 		// not fail the caller (webhooks would be retried as if unprocessed).
 		// Interval/region gates on monitor create/update still hold the line.
 		if n, rerr := h.store.ReconcileMonitorsToPlan(ctx, params.UserID, oldPlan, newPlan); rerr != nil {
-			log.Printf("subscription: failed to reconcile monitors for user %s (%s -> %s): %v", params.UserID, oldPlan, newPlan, rerr)
+			// Non-fatal (see above), but must not be silent: bump a metric so a
+			// reconcile regression is alertable, and tag the log for log-based
+			// alerts. Affected accounts can be repaired with `cmd/backfill`.
+			metrics.SubscriptionReconcileFailuresTotal.Inc()
+			log.Printf("[RECONCILE_FAILED] subscription: failed to reconcile monitors for user %s (%s -> %s): %v", params.UserID, oldPlan, newPlan, rerr)
 		} else if n > 0 {
 			log.Printf("subscription: user %s moved %s -> %s, adjusted %d monitor(s)", params.UserID, oldPlan, newPlan, n)
 		}

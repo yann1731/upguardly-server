@@ -989,7 +989,7 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 			 WHERE %s AND interval < ?`,
 			planScopeSQL,
 		)
-		res, err := s.client.DB.NewRaw(query, userId, userId, newLimits.MinInterval, newLimits.MinInterval).Exec(ctx)
+		res, err := s.client.DB.NewRaw(query, newLimits.MinInterval, userId, userId, newLimits.MinInterval).Exec(ctx)
 		if err != nil {
 			return total, mapError(err)
 		}
@@ -1004,7 +1004,7 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 			 WHERE %s AND interval = ? AND timeout < ?`,
 			planScopeSQL,
 		)
-		res, err := s.client.DB.NewRaw(query, userId, userId, newLimits.MinInterval, oldLimits.MinInterval, newLimits.MinInterval).Exec(ctx)
+		res, err := s.client.DB.NewRaw(query, newLimits.MinInterval, userId, userId, oldLimits.MinInterval, newLimits.MinInterval).Exec(ctx)
 		if err != nil {
 			return total, mapError(err)
 		}
@@ -1021,7 +1021,7 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 			 WHERE %s AND cardinality(regions) > ?`,
 			planScopeSQL,
 		)
-		res, err := s.client.DB.NewRaw(query, userId, userId, newLimits.MaxRegions, newLimits.MaxRegions).Exec(ctx)
+		res, err := s.client.DB.NewRaw(query, newLimits.MaxRegions, userId, userId, newLimits.MaxRegions).Exec(ctx)
 		if err != nil {
 			return total, mapError(err)
 		}
