@@ -48,3 +48,27 @@ func TestMaxRegionsPerPlan(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveInterval(t *testing.T) {
+	ptr := func(i int) *int { return &i }
+	tests := []struct {
+		name    string
+		raw     *int
+		plan    string
+		timeout int
+		want    int
+	}{
+		{"explicit override returned as-is", ptr(120), "FREE", 30, 120},
+		{"explicit below plan floor still returned (validated at write)", ptr(60), "FREE", 30, 60},
+		{"follow-plan FREE resolves to 300", nil, "FREE", 30, 300},
+		{"follow-plan PRO resolves to 60", nil, "PRO", 30, 60},
+		{"follow-plan unknown plan falls back to FREE floor", nil, "BOGUS", 30, 300},
+		{"follow-plan clamps up so timeout stays below interval", nil, "PRO", 90, 91},
+		{"timeout equal to floor also clamps", nil, "PRO", 60, 61},
+	}
+	for _, tt := range tests {
+		if got := EffectiveInterval(tt.raw, tt.plan, tt.timeout); got != tt.want {
+			t.Errorf("%s: EffectiveInterval(%v, %q, %d) = %d, want %d", tt.name, tt.raw, tt.plan, tt.timeout, got, tt.want)
+		}
+	}
+}

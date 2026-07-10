@@ -95,28 +95,36 @@ func TestCreateMonitor(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 
-	t.Run("unspecified interval defaults to the plan minimum (FREE=300)", func(t *testing.T) {
-		// A FREE user creating a monitor without an interval must get the
-		// plan's minimum, not a flat 60 that the plan check would reject.
-		store := &mockStore{monitorResult: aMonitor()}
-		router, h := newTestRouter(store)
-		router.POST("/v1/monitors", h.CreateMonitor)
+	t.Run("unspecified interval stores follow-plan (NULL), resolved at read time", func(t *testing.T) {
+		// A monitor created without an interval follows its plan: the handler
+		// stores NULL (nil) rather than materializing a floor, so the interval
+		// tracks the current plan automatically. This holds regardless of plan.
+		for _, plan := range []string{"FREE", "PRO"} {
+			store := &mockStore{monitorResult: aMonitor()}
+			if plan != "FREE" {
+				store.subResult = aSubscription(plan)
+			}
+			router, h := newTestRouter(store)
+			router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+			w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
 
-		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.Equal(t, 300, store.lastCreateInterval)
+			assert.Equal(t, http.StatusCreated, w.Code, plan)
+			assert.Nil(t, store.lastCreateInterval, "%s: unspecified interval must be stored as follow-plan (nil)", plan)
+		}
 	})
 
-	t.Run("unspecified interval defaults to the plan minimum (PRO=60)", func(t *testing.T) {
+	t.Run("explicit interval at or above the plan minimum is stored as an override", func(t *testing.T) {
 		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","interval":120}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.Equal(t, 60, store.lastCreateInterval)
+		if assert.NotNil(t, store.lastCreateInterval) {
+			assert.Equal(t, 120, *store.lastCreateInterval)
+		}
 	})
 
 	t.Run("explicit interval below the plan minimum returns 402", func(t *testing.T) {

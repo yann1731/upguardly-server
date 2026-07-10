@@ -8,7 +8,6 @@ RUN go mod download
 # network access at startup to fetch it.
 RUN go install github.com/air-verse/air@latest
 COPY . .
-RUN go run github.com/steebchen/prisma-client-go generate
 EXPOSE 8080
 CMD ["go", "run", "./cmd/server"]
 
@@ -21,11 +20,10 @@ RUN go mod download
 
 COPY . .
 
-RUN go run github.com/steebchen/prisma-client-go generate
-
 RUN CGO_ENABLED=0 go build -o server ./cmd/server
 RUN CGO_ENABLED=0 go build -o scheduler ./cmd/scheduler
-RUN go build -o prisma-cli github.com/steebchen/prisma-client-go
+# migrate applies the embedded bun migrations (replaces prisma migrate deploy).
+RUN CGO_ENABLED=0 go build -o migrate ./cmd/migrate
 
 # Stage 2: Production
 FROM alpine:3.21
@@ -37,14 +35,11 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 COPY --from=builder /app/server ./
 COPY --from=builder /app/scheduler ./
-COPY --from=builder /app/prisma-cli ./
-COPY --from=builder /root/.cache/prisma /tmp/prisma
-COPY prisma/schema.prisma ./prisma/schema.prisma
-COPY prisma/migrations ./prisma/migrations
+COPY --from=builder /app/migrate ./
 COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-RUN chown -R appuser:appgroup /app /tmp/prisma
+RUN chown -R appuser:appgroup /app
 
 USER appuser
 
@@ -54,12 +49,6 @@ EXPOSE 8080
 # comes from the environment — see internal/config/config.go for names and
 # defaults.
 ENV PORT=8080
-
-# Point prisma-client-go's cache (os.UserCacheDir -> $XDG_CACHE_HOME/prisma) at
-# the binaries bundled at build time under /tmp/prisma. Without this it resolves
-# to $HOME/.cache/prisma, finds nothing, and tries to download the engine at
-# startup — which crash-loops the container when prisma.sh is unreachable.
-ENV XDG_CACHE_HOME=/tmp
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["./server"]

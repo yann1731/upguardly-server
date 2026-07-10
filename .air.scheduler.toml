@@ -10,7 +10,7 @@ tmp_dir = "/tmp/air"
   bin = "/tmp/air/scheduler"
   delay = 500
   include_ext = ["go"]
-  exclude_dir = ["internal/database/prisma", "prisma", "tmp"]
+  exclude_dir = ["tmp"]
   stop_on_error = true
 
 [misc]

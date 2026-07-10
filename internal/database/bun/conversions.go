@@ -6,17 +6,18 @@ import (
 
 func (m *Monitor) toModel() models.Monitor {
 	return models.Monitor{
-		ID:        m.ID,
-		OrgID:     m.OrgID,
-		Name:      m.Name,
-		Type:      models.MonitorType(m.Type),
-		Target:    m.Target,
-		Interval:  m.Interval,
-		Timeout:   m.Timeout,
-		Enabled:   m.Enabled,
-		Regions:   m.Regions,
-		CreatedAt: m.CreatedAt,
-		UpdatedAt: m.UpdatedAt,
+		ID:               m.ID,
+		OrgID:            m.OrgID,
+		Name:             m.Name,
+		Type:             models.MonitorType(m.Type),
+		Target:           m.Target,
+		Interval:         models.EffectiveInterval(m.Interval, m.OwnerPlan, m.Timeout),
+		IntervalIsCustom: m.Interval != nil,
+		Timeout:          m.Timeout,
+		Enabled:          m.Enabled,
+		Regions:          m.Regions,
+		CreatedAt:        m.CreatedAt,
+		UpdatedAt:        m.UpdatedAt,
 	}
 }
 

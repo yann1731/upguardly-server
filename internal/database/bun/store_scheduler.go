@@ -15,6 +15,8 @@ func (s *BunStore) FetchActiveMonitors(ctx context.Context, region string) ([]mo
 	var monitors []Monitor
 	err := s.client.DB.NewSelect().
 		Model(&monitors).
+		ColumnExpr("m.*").
+		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("enabled = true").
 		Where("? = ANY(regions)", region).
 		Scan(ctx)
@@ -40,9 +42,11 @@ func (s *BunStore) FetchOwnedMonitors(ctx context.Context, region string, ownedP
 
 	query := fmt.Sprintf(
 		`SELECT id, user_id, org_id, name, type, target,
-		        "interval", timeout, enabled, regions, created_at, updated_at
+		        "interval", timeout, enabled, regions, created_at, updated_at,
+		        %s AS owner_plan
 		 FROM monitors
 		 WHERE enabled = true AND ? = ANY(regions) AND %s IN (%s)`,
+		ownerPlanExpr("monitors"),
 		partitionSQLExpr,
 		strings.Join(ids, ","),
 	)
@@ -60,22 +64,141 @@ func (s *BunStore) FetchOwnedMonitors(ctx context.Context, region string, ownedP
 	return out, nil
 }
 
-func (s *BunStore) RecordRegionCheck(ctx context.Context, monitorID, region string, result *models.CheckResult) (string, error) {
+func (s *BunStore) RecordRegionCheck(ctx context.Context, monitorID, region string, result *models.CheckResult, source models.CheckSource) (string, error) {
 	var statusCode interface{}
 	if result.StatusCode != nil {
 		statusCode = *result.StatusCode
 	}
 
 	type regionCheckRow struct {
-		Transition string  `json:"transition"`
-		IncidentID *string `json:"incidentId"`
+		Transition string  `bun:"transition"`
+		IncidentID *string `bun:"incident_id"`
 	}
 
 	var row regionCheckRow
 	err := s.client.DB.NewRaw(
-		`SELECT transition, incident_id AS "incidentId"
-		   FROM maintenance.record_region_check(?::text, ?::text, ?::"Status", ?::int4, ?::int4, ?::text)`,
+		`SELECT transition, incident_id
+		   FROM maintenance.record_region_check(?::text, ?::text, ?::"Status", ?::int4, ?::int4, ?::text, ?::int4, ?::text)`,
 		monitorID, region, string(result.Status), result.Latency, statusCode, result.Message,
+		models.RegionStaleMultiplier, string(source),
+	).Scan(ctx, &row)
+	if err != nil {
+		return "none", err
+	}
+	return row.Transition, nil
+}
+
+// UpsertRegionHeartbeat marks this region's scheduler pool alive. Called on a
+// short timer; a region counts toward alert quorum only while its heartbeat is
+// recent (see maintenance.evaluate_monitor_quorum).
+func (s *BunStore) UpsertRegionHeartbeat(ctx context.Context, region string) error {
+	_, err := s.client.DB.NewRaw(
+		`INSERT INTO scheduler_region_heartbeats (region, last_seen_at)
+		 VALUES (?::text, now())
+		 ON CONFLICT (region) DO UPDATE SET last_seen_at = now()`,
+		region,
+	).Exec(ctx)
+	return err
+}
+
+// ClaimVerificationRequests atomically claims up to limit unexpired, unclaimed
+// confirmation checks for this region, joining the monitor so the verifier can
+// run the check without a second query. FOR UPDATE SKIP LOCKED lets multiple
+// instances in a region drain the queue without stepping on each other.
+func (s *BunStore) ClaimVerificationRequests(ctx context.Context, region string, limit int) ([]models.VerificationRequest, error) {
+	claimQuery := fmt.Sprintf(`
+	UPDATE region_verification_requests r
+	SET claimed_at = now(), claimed_by = ?
+	FROM monitors m
+	WHERE m.id = r.monitor_id
+	  AND r.id IN (
+	      SELECT id FROM region_verification_requests
+	      WHERE region = ? AND claimed_at IS NULL AND expires_at > now()
+	      ORDER BY requested_at
+	      LIMIT %d
+	      FOR UPDATE SKIP LOCKED
+	  )
+	  AND m.enabled = true
+	RETURNING r.id, r.monitor_id, r.region, m.type, m.target, m.timeout`, limit)
+
+	type claimRow struct {
+		ID        string `bun:"id"`
+		MonitorID string `bun:"monitor_id"`
+		Region    string `bun:"region"`
+		Type      string `bun:"type"`
+		Target    string `bun:"target"`
+		Timeout   int    `bun:"timeout"`
+	}
+
+	var rows []claimRow
+	if err := s.client.DB.NewRaw(claimQuery, region, region).Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+
+	out := make([]models.VerificationRequest, len(rows))
+	for i, r := range rows {
+		out[i] = models.VerificationRequest{
+			ID:        r.ID,
+			MonitorID: r.MonitorID,
+			Region:    r.Region,
+			Type:      models.MonitorType(r.Type),
+			Target:    r.Target,
+			Timeout:   r.Timeout,
+		}
+	}
+	return out, nil
+}
+
+// CompleteVerificationRequest removes a confirmation request once its check has
+// been recorded.
+func (s *BunStore) CompleteVerificationRequest(ctx context.Context, id string) error {
+	_, err := s.client.DB.NewRaw(
+		`DELETE FROM region_verification_requests WHERE id = ?::text`, id,
+	).Exec(ctx)
+	return err
+}
+
+// ExpireVerificationRequests deletes past-expiry requests and returns the
+// distinct monitor ids affected so quorum can be re-run without them.
+func (s *BunStore) ExpireVerificationRequests(ctx context.Context) ([]string, error) {
+	var ids []string
+	err := s.client.DB.NewRaw(
+		`DELETE FROM region_verification_requests
+		  WHERE id IN (
+		      SELECT id FROM region_verification_requests
+		       WHERE expires_at <= now()
+		       FOR UPDATE SKIP LOCKED
+		  )
+		 RETURNING monitor_id`,
+	).Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	// Distinct monitor ids (a monitor may have multiple expired requests).
+	seen := make(map[string]bool, len(ids))
+	out := ids[:0]
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// EvaluateMonitorQuorum re-runs the quorum decision for a monitor with no
+// triggering check (used by the expiry sweep).
+func (s *BunStore) EvaluateMonitorQuorum(ctx context.Context, monitorID string) (string, error) {
+	type quorumRow struct {
+		Transition string  `bun:"transition"`
+		IncidentID *string `bun:"incident_id"`
+	}
+	var row quorumRow
+	err := s.client.DB.NewRaw(
+		`SELECT transition, incident_id
+		   FROM maintenance.evaluate_monitor_quorum(?::text, NULL::int4, 0::int4, NULL::text)`,
+		monitorID,
 	).Scan(ctx, &row)
 	if err != nil {
 		return "none", err

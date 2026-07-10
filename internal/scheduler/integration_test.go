@@ -1,14 +1,15 @@
 package scheduler
 
-// Integration tests for the scheduler's database paths: the quorum function
-// (maintenance.record_region_check) driven through the runner's Go call path,
-// the batched result writer, and the alert outbox claim/finalize round trip.
-// They need a real Postgres with migrations applied and are skipped unless
+// Integration tests for the scheduler's database paths: cross-region quorum and
+// confirmation (maintenance.record_region_check / evaluate_monitor_quorum)
+// driven through the runner's Go call path, follow-plan interval resolution, the
+// batched result writer, and the alert outbox claim/finalize round trip. They
+// need a real Postgres with migrations applied and are skipped unless
 // SCHEDULER_TEST_DATABASE_URL is set, e.g.:
 //
 //	docker run -d --name pgtest -e POSTGRES_PASSWORD=test -e POSTGRES_DB=upguardly -p 55433:5432 postgres:18-alpine
 //	DATABASE_URL="postgresql://postgres:test@localhost:55433/upguardly?sslmode=disable" \
-//	  go run github.com/steebchen/prisma-client-go migrate deploy
+//	  go run ./cmd/migrate
 //	SCHEDULER_TEST_DATABASE_URL="postgresql://postgres:test@localhost:55433/upguardly?sslmode=disable" \
 //	  go test ./internal/scheduler/ -v
 
@@ -53,7 +54,7 @@ func createTestMonitor(t *testing.T, dbc *bundb.Client, suffix string, regions .
 		Name:      "it-monitor-" + suffix,
 		Type:      string(models.MonitorTypeHTTP),
 		Target:    "https://example.com",
-		Interval:  60,
+		Interval:  ptrInt(60),
 		Timeout:   30,
 		Enabled:   true,
 		Regions:   regions,
@@ -73,7 +74,7 @@ func createTestMonitor(t *testing.T, dbc *bundb.Client, suffix string, regions .
 		Name:      m.Name,
 		Type:      models.MonitorType(m.Type),
 		Target:    m.Target,
-		Interval:  m.Interval,
+		Interval:  models.EffectiveInterval(m.Interval, "FREE", m.Timeout),
 		Timeout:   m.Timeout,
 		Enabled:   m.Enabled,
 		Regions:   m.Regions,
@@ -82,12 +83,62 @@ func createTestMonitor(t *testing.T, dbc *bundb.Client, suffix string, regions .
 	}
 }
 
-// record drives the production recordRegionCheck path for one region.
+func ptrInt(i int) *int { return &i }
+
+// seedHeartbeats resets the region heartbeat table to exactly the given regions
+// (marked live now) and clears it again on cleanup. Alert quorum counts a
+// region only while its heartbeat is recent, and heartbeats are global (not
+// per-monitor), so tests must establish the active set deterministically or
+// state leaks between them.
+func seedHeartbeats(t *testing.T, dbc *bundb.Client, regions ...string) {
+	t.Helper()
+	ctx := context.Background()
+	store := bundb.NewBunStore(dbc)
+	if _, err := dbc.DB.NewRaw(`DELETE FROM scheduler_region_heartbeats`).Exec(ctx); err != nil {
+		t.Fatalf("clear heartbeats: %v", err)
+	}
+	for _, r := range regions {
+		if err := store.UpsertRegionHeartbeat(ctx, r); err != nil {
+			t.Fatalf("seed heartbeat %s: %v", r, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = dbc.DB.NewRaw(`DELETE FROM scheduler_region_heartbeats`).Exec(ctx)
+	})
+}
+
+// record drives the production recordRegionCheck path for one region (a normal
+// scheduled check).
 func record(t *testing.T, dbc *bundb.Client, m *models.Monitor, region string, result *models.CheckResult) string {
 	t.Helper()
 	store := bundb.NewBunStore(dbc)
 	r := &checkRunner{store: store, region: region}
 	return r.recordRegionCheck(context.Background(), m, result)
+}
+
+// recordVerify drives a one-off confirmation check (SourceVerification), the
+// path the verification worker takes for a region that doesn't normally check
+// the monitor.
+func recordVerify(t *testing.T, dbc *bundb.Client, monitorID, region string, result *models.CheckResult) string {
+	t.Helper()
+	got, err := bundb.NewBunStore(dbc).RecordRegionCheck(context.Background(), monitorID, region, result, models.SourceVerification)
+	if err != nil {
+		t.Fatalf("record verify: %v", err)
+	}
+	return got
+}
+
+// pendingVerifications returns the regions with an open confirmation request
+// for the monitor, sorted.
+func pendingVerifications(t *testing.T, dbc *bundb.Client, monitorID string) []string {
+	t.Helper()
+	var regions []string
+	if err := dbc.DB.NewRaw(
+		`SELECT region FROM region_verification_requests WHERE monitor_id = ? ORDER BY region`, monitorID,
+	).Scan(context.Background(), &regions); err != nil {
+		t.Fatalf("list verifications: %v", err)
+	}
+	return regions
 }
 
 func openIncidents(t *testing.T, dbc *bundb.Client, monitorID string) []bundb.Incident {
@@ -112,6 +163,9 @@ func openIncidents(t *testing.T, dbc *bundb.Client, monitorID string) []bundb.In
 func TestRegionCheckSingleRegionTransitions(t *testing.T) {
 	dbc := integrationDB(t)
 	m := createTestMonitor(t, dbc, fmt.Sprintf("inc-%d", time.Now().UnixNano()), "na-east")
+	// Single-region deployment: only na-east is active, so there is nothing to
+	// confirm with — the monitor alerts on its own region, as before.
+	seedHeartbeats(t, dbc, "na-east")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "Server error"}
 	degraded := &models.CheckResult{Status: models.StatusDEGRADED, Message: "High latency"}
@@ -160,6 +214,7 @@ func TestRegionCheckQuorum(t *testing.T) {
 	dbc := integrationDB(t)
 	m := createTestMonitor(t, dbc, fmt.Sprintf("q-%d", time.Now().UnixNano()),
 		"na-east", "eu-west", "ap-southeast")
+	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 	up := &models.CheckResult{Status: models.StatusUP, Message: "ok"}
@@ -204,6 +259,7 @@ func TestRegionCheckStaleRegionIgnored(t *testing.T) {
 	ctx := context.Background()
 	m := createTestMonitor(t, dbc, fmt.Sprintf("st-%d", time.Now().UnixNano()),
 		"na-east", "eu-west")
+	seedHeartbeats(t, dbc, "na-east", "eu-west")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 	up := &models.CheckResult{Status: models.StatusUP, Message: "ok"}
@@ -250,7 +306,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		Name:      "it-monitor-ob",
 		Type:      string(models.MonitorTypeHTTP),
 		Target:    "https://example.com",
-		Interval:  60,
+		Interval:  ptrInt(60),
 		Timeout:   30,
 		Enabled:   true,
 		Regions:   []string{"na-east"},
@@ -306,13 +362,14 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		Name:      m.Name,
 		Type:      models.MonitorType(m.Type),
 		Target:    m.Target,
-		Interval:  m.Interval,
+		Interval:  models.EffectiveInterval(m.Interval, "FREE", m.Timeout),
 		Timeout:   m.Timeout,
 		Enabled:   m.Enabled,
 		Regions:   m.Regions,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}
+	seedHeartbeats(t, dbc, "na-east")
 	if got := record(t, dbc, monModel, "na-east", &models.CheckResult{
 		Status: models.StatusDOWN, Latency: 42, Message: "Server error", StatusCode: &code,
 	}); got != "opened" {
@@ -447,7 +504,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		Target:    "https://example.com",
 		Regions:   []string{"na-east"},
 		OrgID:     &org.ID,
-		Interval:  60,
+		Interval:  ptrInt(60),
 		Timeout:   30,
 		Enabled:   true,
 		CreatedAt: time.Now(),
@@ -466,7 +523,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		Name:      orgMon.Name,
 		Type:      models.MonitorType(orgMon.Type),
 		Target:    orgMon.Target,
-		Interval:  orgMon.Interval,
+		Interval:  models.EffectiveInterval(orgMon.Interval, "FREE", orgMon.Timeout),
 		Timeout:   orgMon.Timeout,
 		Enabled:   orgMon.Enabled,
 		Regions:   orgMon.Regions,
@@ -573,5 +630,231 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	}
 	if rows[0].Region != "na-east" {
 		t.Fatalf("region = %q, want na-east", rows[0].Region)
+	}
+}
+
+// regionStatusSource returns the stored source ('SCHEDULED'/'VERIFICATION') for
+// one region's status row.
+func regionStatusSource(t *testing.T, dbc *bundb.Client, monitorID, region string) string {
+	t.Helper()
+	var src string
+	if err := dbc.DB.NewRaw(
+		`SELECT source FROM monitor_region_status WHERE monitor_id = ? AND region = ?`, monitorID, region,
+	).Scan(context.Background(), &src); err != nil {
+		t.Fatalf("region status source: %v", err)
+	}
+	return src
+}
+
+// A single failing region on a single-region (FREE) monitor no longer alerts on
+// its own: every other active region is asked to confirm first, and the
+// incident opens only once a majority of the active regions agree. This is the
+// cross-region false-positive guard extended to monitors that check from one
+// region.
+func TestVerificationConfirmsBeforeAlert(t *testing.T) {
+	dbc := integrationDB(t)
+	m := createTestMonitor(t, dbc, fmt.Sprintf("vc-%d", time.Now().UnixNano()), "na-east")
+	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+
+	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
+
+	// na-east reports DOWN: 1 of 3 active regions — a minority, so no incident,
+	// but the other two active regions are queued to confirm.
+	if got := record(t, dbc, m, "na-east", down); got != "none" {
+		t.Fatalf("origin DOWN: got %q, want none (awaiting confirmation)", got)
+	}
+	if n := len(openIncidents(t, dbc, m.ID)); n != 0 {
+		t.Fatalf("open incidents before confirmation = %d, want 0", n)
+	}
+	if pend := pendingVerifications(t, dbc, m.ID); len(pend) != 2 ||
+		pend[0] != "ap-southeast" || pend[1] != "eu-west" {
+		t.Fatalf("pending confirmations = %v, want [ap-southeast eu-west]", pend)
+	}
+
+	// eu-west confirms DOWN: 2 of 3 — majority — opens the incident.
+	if got := recordVerify(t, dbc, m.ID, "eu-west", down); got != "opened" {
+		t.Fatalf("confirmation DOWN: got %q, want opened", got)
+	}
+	// The confirming region (not one this monitor normally checks) is recorded
+	// as VERIFICATION so it stays out of the per-region status UI.
+	if src := regionStatusSource(t, dbc, m.ID, "eu-west"); src != "VERIFICATION" {
+		t.Fatalf("eu-west source = %q, want VERIFICATION", src)
+	}
+	if src := regionStatusSource(t, dbc, m.ID, "na-east"); src != "SCHEDULED" {
+		t.Fatalf("na-east source = %q, want SCHEDULED", src)
+	}
+}
+
+// A genuinely regional blip — the origin sees DOWN but every other region
+// confirms UP — must never open an incident.
+func TestVerificationRegionalBlipNeverAlerts(t *testing.T) {
+	dbc := integrationDB(t)
+	m := createTestMonitor(t, dbc, fmt.Sprintf("blip-%d", time.Now().UnixNano()), "na-east")
+	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+
+	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
+	up := &models.CheckResult{Status: models.StatusUP, Message: "ok"}
+
+	if got := record(t, dbc, m, "na-east", down); got != "none" {
+		t.Fatalf("origin DOWN: got %q, want none", got)
+	}
+	if got := recordVerify(t, dbc, m.ID, "eu-west", up); got != "none" {
+		t.Fatalf("eu-west UP: got %q, want none", got)
+	}
+	if got := recordVerify(t, dbc, m.ID, "ap-southeast", up); got != "none" {
+		t.Fatalf("ap-southeast UP: got %q, want none", got)
+	}
+	if n := len(openIncidents(t, dbc, m.ID)); n != 0 {
+		t.Fatalf("open incidents after all-confirm-UP = %d, want 0", n)
+	}
+}
+
+// If no region answers the confirmation request, the request eventually expires
+// and the fallback sweep re-evaluates quorum without it — so a real outage that
+// silences the peer regions still alerts, on a bounded delay rather than never.
+func TestVerificationExpiryFallbackAlerts(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+	m := createTestMonitor(t, dbc, fmt.Sprintf("exp-%d", time.Now().UnixNano()), "na-east")
+	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+	store := bundb.NewBunStore(dbc)
+
+	if got := record(t, dbc, m, "na-east", &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}); got != "none" {
+		t.Fatalf("origin DOWN: got %q, want none", got)
+	}
+
+	// Nobody confirms; force the requests past expiry and run the sweep.
+	if _, err := dbc.DB.NewRaw(
+		`UPDATE region_verification_requests SET expires_at = now() - interval '1 second' WHERE monitor_id = ?`, m.ID,
+	).Exec(ctx); err != nil {
+		t.Fatalf("expire requests: %v", err)
+	}
+	ids, err := store.ExpireVerificationRequests(ctx)
+	if err != nil {
+		t.Fatalf("ExpireVerificationRequests: %v", err)
+	}
+	found := false
+	for _, id := range ids {
+		if id == m.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expired monitor ids %v missing %s", ids, m.ID)
+	}
+	// With the unanswered confirmations gone from the denominator, the origin's
+	// DOWN is now a majority of the reporting set → opens.
+	if got, err := store.EvaluateMonitorQuorum(ctx, m.ID); err != nil || got != "opened" {
+		t.Fatalf("EvaluateMonitorQuorum after expiry: got %q err %v, want opened", got, err)
+	}
+}
+
+// On resolve, verification artifacts are purged so a stale confirmation DOWN
+// can't linger and combine with a later single-region blip into a false reopen.
+func TestVerificationResolveClearsConfirmations(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+	m := createTestMonitor(t, dbc, fmt.Sprintf("rc-%d", time.Now().UnixNano()), "na-east")
+	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+
+	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
+
+	record(t, dbc, m, "na-east", down)
+	if got := recordVerify(t, dbc, m.ID, "eu-west", down); got != "opened" {
+		t.Fatalf("confirm DOWN: got %q, want opened", got)
+	}
+
+	// Origin recovers → below majority → resolve, and confirmations are purged.
+	if got := record(t, dbc, m, "na-east", &models.CheckResult{Status: models.StatusUP, Message: "ok"}); got != "resolved" {
+		t.Fatalf("recovery: got %q, want resolved", got)
+	}
+	var verificationRows, requests int
+	_ = dbc.DB.NewRaw(`SELECT count(*) FROM monitor_region_status WHERE monitor_id = ? AND source = 'VERIFICATION'`, m.ID).Scan(ctx, &verificationRows)
+	_ = dbc.DB.NewRaw(`SELECT count(*) FROM region_verification_requests WHERE monitor_id = ?`, m.ID).Scan(ctx, &requests)
+	if verificationRows != 0 || requests != 0 {
+		t.Fatalf("after resolve: verification rows=%d requests=%d, want 0/0", verificationRows, requests)
+	}
+}
+
+// A follow-plan monitor (NULL interval) resolves its interval from the owner's
+// current plan at fetch time: no per-monitor write, so a plan change takes
+// effect on the next scheduler sync.
+func TestFollowPlanIntervalResolvesAtFetch(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+	owner := fmt.Sprintf("it-user-fp-%d", time.Now().UnixNano())
+	region := "na-east"
+
+	m := &bundb.Monitor{
+		ID:        uuid.NewString(),
+		UserID:    owner,
+		Name:      "it-monitor-fp",
+		Type:      string(models.MonitorTypeHTTP),
+		Target:    "https://example.com",
+		Interval:  nil, // follow plan
+		Timeout:   30,
+		Enabled:   true,
+		Regions:   []string{region},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(m).Exec(ctx); err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+	t.Cleanup(func() { _, _ = dbc.DB.NewDelete().Table("monitors").Where("id = ?", m.ID).Exec(ctx) })
+
+	store := bundb.NewBunStore(dbc)
+	find := func() *models.Monitor {
+		mons, err := store.FetchActiveMonitors(ctx, region)
+		if err != nil {
+			t.Fatalf("FetchActiveMonitors: %v", err)
+		}
+		for i := range mons {
+			if mons[i].ID == m.ID {
+				return &mons[i]
+			}
+		}
+		t.Fatalf("monitor %s not fetched", m.ID)
+		return nil
+	}
+
+	// No subscription → FREE → 300.
+	if got := find(); got.Interval != 300 || got.IntervalIsCustom {
+		t.Fatalf("FREE follow-plan: interval=%d custom=%v, want 300/false", got.Interval, got.IntervalIsCustom)
+	}
+
+	// Upgrade to PRO → 60, with no write to the monitor row.
+	sub := &bundb.Subscription{
+		ID:        uuid.NewString(),
+		UserID:    owner,
+		Plan:      "PRO",
+		Status:    "ACTIVE",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(sub).Exec(ctx); err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	t.Cleanup(func() { _, _ = dbc.DB.NewDelete().Table("subscriptions").Where("id = ?", sub.ID).Exec(ctx) })
+
+	if got := find(); got.Interval != 60 || got.IntervalIsCustom {
+		t.Fatalf("PRO follow-plan: interval=%d custom=%v, want 60/false", got.Interval, got.IntervalIsCustom)
+	}
+}
+
+// The plan-floor constants duplicated into maintenance.effective_interval must
+// stay equal to models.LimitsForPlan — this pins the one place SQL and Go share
+// the numbers.
+func TestEffectiveIntervalSQLMatchesGo(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+	for _, plan := range []string{"FREE", "PRO", "ENTERPRISE"} {
+		var got int
+		if err := dbc.DB.NewRaw(`SELECT maintenance.effective_interval(NULL::int, ?)`, plan).Scan(ctx, &got); err != nil {
+			t.Fatalf("effective_interval(%s): %v", plan, err)
+		}
+		if want := models.LimitsForPlan(plan).MinInterval; got != want {
+			t.Fatalf("effective_interval(NULL, %q) = %d, want %d (models.LimitsForPlan)", plan, got, want)
+		}
 	}
 }

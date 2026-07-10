@@ -59,18 +59,25 @@ type Subscription struct {
 type Monitor struct {
 	bun.BaseModel `bun:"table:monitors,alias:m"`
 
-	ID        string    `bun:"id,pk,default:cuid()"`
-	UserID    string    `bun:"user_id,notnull"`
-	OrgID     *string   `bun:"org_id"`
-	Name      string    `bun:"name,notnull"`
-	Type      string    `bun:"type,notnull"`
-	Target    string    `bun:"target,notnull"`
-	Interval  int       `bun:"interval,notnull,default:60"`
+	ID     string  `bun:"id,pk,default:cuid()"`
+	UserID string  `bun:"user_id,notnull"`
+	OrgID  *string `bun:"org_id"`
+	Name   string  `bun:"name,notnull"`
+	Type   string  `bun:"type,notnull"`
+	Target string  `bun:"target,notnull"`
+	// Interval is nullable: NULL = follow the owner's plan (resolved via
+	// OwnerPlan at conversion time); a value is an explicit override.
+	Interval  *int      `bun:"interval"`
 	Timeout   int       `bun:"timeout,notnull,default:30"`
 	Enabled   bool      `bun:"enabled,notnull,default:true"`
 	Regions   []string  `bun:"regions,array,default:'{\"na-east\"}'"`
 	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 	UpdatedAt time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+
+	// OwnerPlan is the monitor owner's effective plan, populated by a computed
+	// column on monitor-returning queries (see ownerPlanExpr). Not a stored
+	// column — scan-only — it feeds models.EffectiveInterval in toModel.
+	OwnerPlan string `bun:"owner_plan,scanonly"`
 }
 
 type MonitorResultRollup struct {
@@ -107,6 +114,7 @@ type MonitorRegionStatus struct {
 	Latency    int       `bun:"latency,notnull,default:0"`
 	StatusCode *int      `bun:"status_code"`
 	Message    *string   `bun:"message"`
+	Source     string    `bun:"source,notnull,default:'SCHEDULED'"`
 	CheckedAt  time.Time `bun:"checked_at,nullzero,notnull,default:current_timestamp"`
 }
 

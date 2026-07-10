@@ -39,7 +39,7 @@ The codebase ships **two binaries**:
 
 - **Language:** Go 1.25
 - **Web framework:** [Gin](https://github.com/gin-gonic/gin)
-- **Database:** PostgreSQL (port 5432) via the [Prisma Client Go](https://github.com/steebchen/prisma-client-go) ORM
+- **Database:** PostgreSQL (port 5432) via the [bun](https://github.com/uptrace/bun) SQL-first ORM
 - **Auth:** [SuperTokens](https://supertokens.com/) (email/password + sessions)
 - **Billing:** [Stripe](https://github.com/stripe/stripe-go) (`stripe-go/v76`)
 - **Distributed coordination:** [etcd](https://etcd.io/) v3 (leases + watches)
@@ -113,24 +113,26 @@ internal/
   stripeservice/           # Stripe client wrapper (checkout, portal, webhooks)
   metrics/                 # Prometheus metric definitions
   models/                  # domain types, the Store interface, request DTOs
-  database/                # Prisma client wrapper + Store implementation
-prisma/
-  schema.prisma            # data model (source of truth)
-  migrations/              # SQL migrations applied via `migrate deploy`
-entrypoint.sh              # runs `prisma migrate deploy` then exec's the binary
+  database/bun/            # bun (github.com/uptrace/bun) Store implementation
+  database/bun/migrations/ # embedded SQL migrations (source of truth)
+cmd/migrate/               # applies the embedded migrations, then exits
+entrypoint.sh              # runs ./migrate then exec's the binary
 Dockerfile                 # multi-stage: dev / builder / production (distroless-ish alpine)
 ```
 
-The `internal/database/prisma/` directory contains **generated** code
-(`go run github.com/steebchen/prisma-client-go generate`) and the query engine
-binary; it is gitignored and produced at build time.
+Schema changes live as transactional SQL files under
+`internal/database/bun/migrations/` (`<timestamp>_<name>.tx.up.sql`), embedded
+into the `migrate` binary and applied by bun's migrate framework. There is no
+generated client and no declarative schema file — the migrations are the sole
+source of truth.
 
 ---
 
 ## Data model
 
-Defined in `prisma/schema.prisma`. PostgreSQL is the store; tables use
-`snake_case` via `@map`. All IDs are CUIDs.
+Defined by the migrations under `internal/database/bun/migrations/`. PostgreSQL
+is the store; tables use `snake_case`. All IDs are CUIDs (application-generated)
+or UUIDs.
 
 | Model | Purpose | Key fields |
 |-------|---------|-----------|
@@ -144,8 +146,11 @@ Defined in `prisma/schema.prisma`. PostgreSQL is the store; tables use
 | `AlertHistory` | Log of sent alerts | `status`, `message`, `sentAt` |
 
 > **Note:** the database is **shared with the SuperTokens core**. Migrations are
-> applied with `prisma migrate deploy` (never `db push`) precisely so Prisma never
-> drops the SuperTokens‑owned tables in the same schema (see `entrypoint.sh`).
+> forward-only (bun migrate, via `cmd/migrate`) and never drop tables they don't
+> manage, precisely so the SuperTokens‑owned tables in the same schema are left
+> alone (see `entrypoint.sh`). On a database that was previously migrated with
+> prisma, `cmd/migrate` baselines the pre-switch history (marks it applied without
+> re-running) before applying newer migrations.
 
 All access goes through the `models.Store` interface (`internal/models/store.go`),
 implemented by `database.PrismaStore`. This indirection makes handlers unit‑testable
@@ -391,11 +396,12 @@ All config is loaded from environment variables in `internal/config/config.go`
 ## Build & run
 
 ```bash
-# Generate the Prisma client (required before building; needs DATABASE_URL set)
-go run github.com/steebchen/prisma-client-go generate
+# Apply migrations (requires a running PostgreSQL; reads DIRECT_DATABASE_URL or
+# DATABASE_URL). Idempotent — safe to run repeatedly.
+go run ./cmd/migrate
 
-# Apply migrations (requires a running PostgreSQL)
-go run github.com/steebchen/prisma-client-go migrate dev --name <name>
+# To add a migration, drop a new internal/database/bun/migrations/
+# <timestamp>_<name>.tx.up.sql file; it is picked up automatically.
 
 # Build everything
 go build ./...
@@ -406,8 +412,6 @@ go run ./cmd/server
 # Run a distributed scheduler worker (needs etcd)
 go run ./cmd/scheduler
 ```
-
-The full `go build ./...` only succeeds once the Prisma client has been generated.
 
 ---
 
@@ -427,12 +431,11 @@ there are unit tests for monitors, alerts, health, and the domain models.
 
 ## Docker & deployment
 
-- **`Dockerfile`** is multi‑stage: a `dev` stage (`go run` with live Prisma generate),
-  a static (CGO‑free) `builder` producing `server`, `scheduler` and a bundled
-  `prisma-cli`, and a slim `alpine` production stage running as a non‑root user.
-  `entrypoint.sh` runs `prisma migrate deploy` before exec'ing the binary. The Prisma
-  query‑engine cache is baked into the image (`XDG_CACHE_HOME=/tmp`) so the container
-  never tries to download it at startup.
+- **`Dockerfile`** is multi‑stage: a `dev` stage (`go run`), a static (CGO‑free)
+  `builder` producing `server`, `scheduler` and `migrate`, and a slim `alpine`
+  production stage running as a non‑root user. `entrypoint.sh` runs `./migrate`
+  (the embedded bun migrator) before exec'ing the binary, gated by
+  `RUN_MIGRATIONS` so exactly one process migrates.
 - **`docker-compose.yaml`** (repo root) wires up `server`, `scheduler`, `db`
   (Postgres 18), `supertokens`, and `etcd` with health checks.
 - **CI/CD** (`.github/workflows/ci-cd.yml`) triggers on `v*` tags: runs `go vet` +

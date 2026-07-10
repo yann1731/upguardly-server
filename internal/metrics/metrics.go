@@ -29,6 +29,16 @@ var (
 		Help: "Total number of alerts sent.",
 	}, []string{"monitor_id", "monitor_name", "channel", "status"})
 
+	VerificationChecksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "upguardly_verification_checks_total",
+		Help: "Total number of one-off cross-region confirmation checks run, by this region and resulting status.",
+	}, []string{"region", "status"})
+
+	VerificationRequestsExpiredTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "upguardly_verification_requests_expired_total",
+		Help: "Total number of cross-region confirmation requests that expired without a response and triggered a fallback quorum re-evaluation.",
+	})
+
 	HTTPRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "upguardly_http_requests_total",
 		Help: "Total number of HTTP requests handled.",

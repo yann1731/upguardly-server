@@ -48,34 +48,21 @@ jobs:
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y gcc musl-dev postgresql-client
 
-      - name: Generate Prisma client
-        run: go run github.com/steebchen/prisma-client-go generate
-        env:
-          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/placeholder"
-
       - name: go vet
         run: go vet ./...
 
       - name: go test
         run: go test -race ./...
 
-      # Gate 1: every committed migration must apply cleanly from an empty DB.
-      # Gate 2: schema.prisma and the committed migrations must not have drifted
-      # (nobody edited the schema without generating a migration). `migrate diff
-      # --exit-code` returns 2 when there is a diff, which fails the step.
-      - name: Migration check (apply + drift)
+      # Every committed migration must apply cleanly from an empty database.
+      # (The former schema-vs-migrations drift gate went away with prisma: the
+      # bun migrations are the sole source of truth — there is no declarative
+      # schema to drift from.) The scheduler integration tests re-use this same
+      # applied database.
+      - name: Migration check (apply from empty)
         env:
           DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/upguardly_ci"
-          SHADOW_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/upguardly_shadow"
-        run: |
-          set -euo pipefail
-          go run github.com/steebchen/prisma-client-go migrate deploy --schema ./prisma/schema.prisma
-          PGPASSWORD=postgres createdb -h localhost -U postgres upguardly_shadow
-          go run github.com/steebchen/prisma-client-go migrate diff \
-            --from-migrations ./prisma/migrations \
-            --to-schema-datamodel ./prisma/schema.prisma \
-            --shadow-database-url "$SHADOW_DATABASE_URL" \
-            --exit-code
+        run: go run ./cmd/migrate
 
       # Advisory only (never fails the build): surface destructive DDL in new
       # migrations so it gets a deliberate expand/contract review. See
@@ -85,7 +72,7 @@ jobs:
         run: |
           set -uo pipefail
           base="origin/${{ github.base_ref }}"
-          files=$(git diff --name-only "$base"...HEAD -- 'prisma/migrations' | grep '\.sql$' || true)
+          files=$(git diff --name-only "$base"...HEAD -- 'internal/database/bun/migrations' | grep '\.sql$' || true)
           if [ -z "$files" ]; then
             echo "No new migration SQL in this PR."
             exit 0

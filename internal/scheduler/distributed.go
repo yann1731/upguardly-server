@@ -186,7 +186,7 @@ func (s *DistributedScheduler) reconcileJob(ctx context.Context, m *models.Monit
 	s.mu.RUnlock()
 
 	if exists {
-		if j.updatedAt.Equal(m.UpdatedAt) {
+		if j.updatedAt.Equal(m.UpdatedAt) && j.interval == m.Interval {
 			return
 		}
 		j.cancel()
@@ -200,7 +200,7 @@ func (s *DistributedScheduler) startMonitorJob(parentCtx context.Context, m *mod
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s.mu.Lock()
-	s.jobs[m.ID] = &job{cancel: cancel, updatedAt: m.UpdatedAt}
+	s.jobs[m.ID] = &job{cancel: cancel, updatedAt: m.UpdatedAt, interval: m.Interval}
 	s.mu.Unlock()
 
 	go s.runner.jobLoop(ctx, m)

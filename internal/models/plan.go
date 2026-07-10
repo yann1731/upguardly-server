@@ -44,6 +44,25 @@ func (l PlanLimits) ChannelAllowed(ch AlertChannel) bool {
 	return false
 }
 
+// EffectiveInterval resolves a monitor's stored interval to the value the
+// scheduler should actually use. A non-nil raw interval is an explicit override
+// and is returned as-is (write-time validation already enforced the plan floor
+// and timeout < interval). A nil interval means "follow plan": it resolves to
+// the plan's minimum, but never below timeout+1 so the timeout < interval
+// invariant survives a plan upgrade that drops the floor beneath an existing
+// timeout. KEEP IN SYNC with maintenance.effective_interval (the SQL mirror
+// used only for the quorum freshness window).
+func EffectiveInterval(raw *int, plan string, timeout int) int {
+	if raw != nil {
+		return *raw
+	}
+	floor := LimitsForPlan(plan).MinInterval
+	if timeout >= floor {
+		floor = timeout + 1
+	}
+	return floor
+}
+
 // LimitsForPlan returns the resource limits for a subscription plan name.
 // Unknown or empty plans fall back to the FREE tier.
 func LimitsForPlan(plan string) PlanLimits {

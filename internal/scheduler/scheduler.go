@@ -11,12 +11,14 @@ import (
 )
 
 // job tracks one running monitor goroutine. updatedAt is the monitor's
-// updated_at at the time the job was started: when it changes, the scheduler
-// restarts the job so interval/target/timeout edits take effect without any
-// per-tick config reads.
+// updated_at at the time the job was started; interval is the effective check
+// interval it was started with. When either changes the scheduler restarts the
+// job so config edits — and follow-plan interval changes, which a plan change
+// alters without touching updated_at — take effect without per-tick config reads.
 type job struct {
 	cancel    context.CancelFunc
 	updatedAt time.Time
+	interval  int
 }
 
 // Scheduler is the embedded single-process scheduler used by cmd/server for
@@ -96,7 +98,7 @@ func (s *Scheduler) reconcileJob(ctx context.Context, m *models.Monitor) {
 	s.mu.RUnlock()
 
 	if exists {
-		if j.updatedAt.Equal(m.UpdatedAt) {
+		if j.updatedAt.Equal(m.UpdatedAt) && j.interval == m.Interval {
 			return
 		}
 		j.cancel()
@@ -110,7 +112,7 @@ func (s *Scheduler) startMonitorJob(parentCtx context.Context, m *models.Monitor
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	s.mu.Lock()
-	s.jobs[m.ID] = &job{cancel: cancel, updatedAt: m.UpdatedAt}
+	s.jobs[m.ID] = &job{cancel: cancel, updatedAt: m.UpdatedAt, interval: m.Interval}
 	s.mu.Unlock()
 
 	go s.runner.jobLoop(ctx, m)

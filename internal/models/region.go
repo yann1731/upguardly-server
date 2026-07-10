@@ -68,3 +68,27 @@ type MonitorRegionStatus struct {
 	CheckedAt  time.Time `json:"checkedAt"`
 	Stale      bool      `json:"stale"`
 }
+
+// CheckSource distinguishes a monitor's normal per-interval check from a
+// one-off cross-region confirmation triggered by another region's failure. It
+// controls whether recording the check enqueues further confirmations (only
+// SourceScheduled does — verification checks never fan out, to avoid a loop).
+type CheckSource string
+
+const (
+	SourceScheduled    CheckSource = "SCHEDULED"
+	SourceVerification CheckSource = "VERIFICATION"
+)
+
+// VerificationRequest is a claimed one-off confirmation check: a region has
+// been asked to verify a monitor another region just reported unhealthy. It
+// carries the monitor fields the verifier needs to run the check without a
+// second query.
+type VerificationRequest struct {
+	ID        string
+	MonitorID string
+	Region    string
+	Type      MonitorType
+	Target    string
+	Timeout   int
+}

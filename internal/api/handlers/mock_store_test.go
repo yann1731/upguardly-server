@@ -69,7 +69,7 @@ type mockStore struct {
 	lastLimit                int
 	lastUpsertSub            *models.UpsertSubscriptionParams
 	deleteOrgCalled          bool
-	lastCreateInterval       int
+	lastCreateInterval       *int
 	lastCreateRegions        []string
 	lastUpdateReq            *models.UpdateMonitorRequest
 	lastResultsRegion        string
@@ -86,7 +86,7 @@ type reconcileCall struct {
 	NewPlan string
 }
 
-func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval, _ int, _ bool, regions []string) (*models.Monitor, error) {
+func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval *int, _ int, _ bool, regions []string) (*models.Monitor, error) {
 	m.lastCreateInterval = interval
 	m.lastCreateRegions = regions
 	return m.monitorResult, m.monitorErr

@@ -13,8 +13,9 @@ var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
 
 type Store interface {
-	// Monitors
-	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool, regions []string) (*Monitor, error)
+	// Monitors. interval is nil for a follow-plan monitor (resolved to the
+	// plan minimum at read time), or an explicit override in seconds.
+	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, enabled bool, regions []string) (*Monitor, error)
 	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
 	CountMonitorsByUser(ctx context.Context, userId string) (int, error)
 	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
@@ -74,8 +75,23 @@ type Store interface {
 type SchedulerStore interface {
 	FetchActiveMonitors(ctx context.Context, region string) ([]Monitor, error)
 	FetchOwnedMonitors(ctx context.Context, region string, ownedPartitions []int, partitionSQLExpr string) ([]Monitor, error)
-	RecordRegionCheck(ctx context.Context, monitorID, region string, result *CheckResult) (string, error)
+	RecordRegionCheck(ctx context.Context, monitorID, region string, result *CheckResult, source CheckSource) (string, error)
 	PersistMonitorResults(ctx context.Context, region string, results []PendingResult) error
 	ClaimOutboxAlerts(ctx context.Context, limit int) ([]AlertOutboxRow, error)
 	FinalizeOutboxAlert(ctx context.Context, id string, status Status, message string, alertID, notificationChannelID *string) error
+
+	// Cross-region confirmation (see maintenance.record_region_check /
+	// evaluate_monitor_quorum, migration 20260706120000).
+	UpsertRegionHeartbeat(ctx context.Context, region string) error
+	ClaimVerificationRequests(ctx context.Context, region string, limit int) ([]VerificationRequest, error)
+	CompleteVerificationRequest(ctx context.Context, id string) error
+	// ExpireVerificationRequests deletes verification requests past their
+	// expiry and returns the distinct monitor ids that lost one, so the caller
+	// can re-run quorum for them (a non-responding region must not block the
+	// decision forever).
+	ExpireVerificationRequests(ctx context.Context) ([]string, error)
+	// EvaluateMonitorQuorum re-runs the quorum decision for a monitor without a
+	// triggering check, used by the expiry sweep. Returns the incident
+	// transition ("none"/"opened"/"escalated"/"resolved").
+	EvaluateMonitorQuorum(ctx context.Context, monitorID string) (string, error)
 }

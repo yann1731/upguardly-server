@@ -24,17 +24,21 @@ const (
 )
 
 type Monitor struct {
-	ID        string      `json:"id"`
-	OrgID     *string     `json:"orgId,omitempty"`
-	Name      string      `json:"name"`
-	Type      MonitorType `json:"type"`
-	Target    string      `json:"target"`
-	Interval  int         `json:"interval"`
-	Timeout   int         `json:"timeout"`
-	Enabled   bool        `json:"enabled"`
-	Regions   []string    `json:"regions"`
-	CreatedAt time.Time   `json:"createdAt"`
-	UpdatedAt time.Time   `json:"updatedAt"`
+	ID     string      `json:"id"`
+	OrgID  *string     `json:"orgId,omitempty"`
+	Name   string      `json:"name"`
+	Type   MonitorType `json:"type"`
+	Target string      `json:"target"`
+	// Interval is the effective check interval in seconds — the plan minimum
+	// for follow-plan monitors, or the explicit override. IntervalIsCustom is
+	// false when the monitor follows its plan (stored interval is NULL).
+	Interval         int       `json:"interval"`
+	IntervalIsCustom bool      `json:"intervalIsCustom"`
+	Timeout          int       `json:"timeout"`
+	Enabled          bool      `json:"enabled"`
+	Regions          []string  `json:"regions"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type CreateMonitorRequest struct {
@@ -53,13 +57,16 @@ type CreateMonitorRequest struct {
 }
 
 type UpdateMonitorRequest struct {
-	Name     *string      `json:"name"`
-	Type     *MonitorType `json:"type" binding:"omitempty,oneof=HTTP PORT PING"`
-	Target   *string      `json:"target"`
-	Interval *int         `json:"interval"`
-	Timeout  *int         `json:"timeout"`
-	Enabled  *bool        `json:"enabled"`
-	Regions  *[]string    `json:"regions"`
+	Name   *string      `json:"name"`
+	Type   *MonitorType `json:"type" binding:"omitempty,oneof=HTTP PORT PING"`
+	Target *string      `json:"target"`
+	// Interval: a positive value is an explicit override (must be >= the plan
+	// minimum); 0 is the "revert to follow-plan" sentinel (stores NULL); nil
+	// leaves the interval unchanged.
+	Interval *int      `json:"interval"`
+	Timeout  *int      `json:"timeout"`
+	Enabled  *bool     `json:"enabled"`
+	Regions  *[]string `json:"regions"`
 }
 
 // NormalizeRegions dedupes a region list (preserving order) and rejects ids
@@ -128,7 +135,8 @@ func (r *UpdateMonitorRequest) Validate() error {
 	if r.Target != nil && len(*r.Target) > MonitorTargetMaxLen {
 		return fmt.Errorf("target must not exceed %d characters", MonitorTargetMaxLen)
 	}
-	if r.Interval != nil && (*r.Interval < MonitorIntervalMin || *r.Interval > MonitorIntervalMax) {
+	// 0 is the "revert to follow-plan" sentinel; only bound explicit values.
+	if r.Interval != nil && *r.Interval != 0 && (*r.Interval < MonitorIntervalMin || *r.Interval > MonitorIntervalMax) {
 		return fmt.Errorf("interval must be between %d and %d seconds", MonitorIntervalMin, MonitorIntervalMax)
 	}
 	if r.Timeout != nil && (*r.Timeout < MonitorTimeoutMin || *r.Timeout > MonitorTimeoutMax) {

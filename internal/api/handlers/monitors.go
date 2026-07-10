@@ -88,14 +88,15 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 	}
 	req.Regions = regions
 
-	// Default an unspecified interval to the plan's minimum, and enforce that
-	// minimum on explicit values. Validate() skipped the interval checks for
-	// the "not provided" case, so re-check timeout against the default here.
+	// Interval: omitted (0) means follow-plan — store NULL and let the plan's
+	// minimum resolve at read time. An explicit value must meet the plan floor.
+	// Validate() skipped the interval checks for the "not provided" case, so
+	// re-check timeout against the floor the monitor will resolve to.
+	var intervalArg *int
 	if req.Interval == 0 {
-		req.Interval = limits.MinInterval
-		if req.Timeout >= req.Interval {
+		if req.Timeout >= limits.MinInterval {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("timeout (%ds) must be less than interval (%ds)", req.Timeout, req.Interval),
+				"error": fmt.Sprintf("timeout (%ds) must be less than interval (%ds)", req.Timeout, limits.MinInterval),
 			})
 			return
 		}
@@ -104,9 +105,12 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 			"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", limits.MinInterval),
 		})
 		return
+	} else {
+		v := req.Interval
+		intervalArg = &v
 	}
 
-	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, req.Interval, req.Timeout, *req.Enabled, req.Regions)
+	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, intervalArg, req.Timeout, *req.Enabled, req.Regions)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})
 		return
@@ -190,11 +194,34 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 			plan = h.planForUser(c.Request.Context(), userId)
 		}
 		limits := models.LimitsForPlan(plan)
-		if req.Interval != nil && *req.Interval < limits.MinInterval {
-			c.JSON(http.StatusPaymentRequired, gin.H{
-				"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", limits.MinInterval),
-			})
-			return
+		if req.Interval != nil {
+			effTimeout := existing.Timeout
+			if req.Timeout != nil {
+				effTimeout = *req.Timeout
+			}
+			if *req.Interval == 0 {
+				// Revert to follow-plan: no floor to enforce, but the timeout
+				// must be under the floor it will resolve to.
+				if effTimeout >= limits.MinInterval {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": fmt.Sprintf("timeout (%ds) must be less than interval (%ds)", effTimeout, limits.MinInterval),
+					})
+					return
+				}
+			} else {
+				if *req.Interval < limits.MinInterval {
+					c.JSON(http.StatusPaymentRequired, gin.H{
+						"error": fmt.Sprintf("Check interval must be at least %d seconds on your plan. Upgrade for more frequent checks.", limits.MinInterval),
+					})
+					return
+				}
+				if effTimeout >= *req.Interval {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": fmt.Sprintf("timeout (%ds) must be less than interval (%ds)", effTimeout, *req.Interval),
+					})
+					return
+				}
+			}
 		}
 		if req.Regions != nil {
 			regions, err := h.validateRegions(*req.Regions, limits)

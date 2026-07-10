@@ -37,7 +37,23 @@ func mapError(err error) error {
 
 // ── Monitors ─────────────────────────────────────────────────────────────────
 
-func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval, timeout int, enabled bool, regions []string) (*models.Monitor, error) {
+// ownerPlanExpr is a SQL expression yielding a monitor's owner's effective plan
+// (org owner's plan for org monitors, else the user's), mirroring
+// handlers.effectivePlan: CANCELED subscriptions carry no entitlement, a
+// missing subscription is FREE. alias is the monitors table alias in the
+// surrounding query ("m" for bun Model selects, "monitors" for raw ones). It is
+// selected AS owner_plan into Monitor.OwnerPlan so toModel can resolve
+// follow-plan (NULL) intervals.
+func ownerPlanExpr(alias string) string {
+	return fmt.Sprintf(`COALESCE((
+		SELECT CASE WHEN s.status = 'CANCELED' THEN 'FREE' ELSE s.plan::text END
+		  FROM subscriptions s
+		 WHERE s.user_id = COALESCE(
+		           (SELECT o.owner_id FROM organizations o WHERE o.id = %[1]s.org_id),
+		           %[1]s.user_id)), 'FREE')`, alias)
+}
+
+func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, enabled bool, regions []string) (*models.Monitor, error) {
 	var orgIDPtr *string
 	if orgId != "" {
 		orgIDPtr = &orgId
@@ -53,7 +69,14 @@ func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monit
 		Enabled:  enabled,
 		Regions:  regions,
 	}
-	if err := s.client.DB.NewInsert().Model(m).ExcludeColumn("id", "created_at", "updated_at").Returning("*").Scan(ctx); err != nil {
+	if err := s.client.DB.NewInsert().Model(m).ExcludeColumn("id", "created_at", "updated_at", "owner_plan").Returning("*").Scan(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	// Returning("*") doesn't include the computed owner_plan; resolve it so the
+	// API response shows the correct effective interval for follow-plan monitors.
+	if err := s.client.DB.NewRaw(
+		"SELECT "+ownerPlanExpr("monitors")+" FROM monitors WHERE id = ?", m.ID,
+	).Scan(ctx, &m.OwnerPlan); err != nil {
 		return nil, mapError(err)
 	}
 	model := m.toModel()
@@ -81,6 +104,8 @@ func (s *BunStore) ListMonitors(ctx context.Context, userId string) ([]models.Mo
 	var monitors []Monitor
 	err := s.client.DB.NewSelect().
 		Model(&monitors).
+		ColumnExpr("m.*").
+		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
 		Scan(ctx)
 	if err != nil {
@@ -97,6 +122,8 @@ func (s *BunStore) GetMonitor(ctx context.Context, id, userId string) (*models.M
 	var m Monitor
 	err := s.client.DB.NewSelect().
 		Model(&m).
+		ColumnExpr("m.*").
+		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("id = ?", id).
 		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
 		Scan(ctx)
@@ -111,6 +138,8 @@ func (s *BunStore) UpdateMonitor(ctx context.Context, id, userId string, req mod
 	var m Monitor
 	err := s.client.DB.NewSelect().
 		Model(&m).
+		ColumnExpr("m.*").
+		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("id = ?", id).
 		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
 		Scan(ctx)
@@ -139,8 +168,15 @@ func (s *BunStore) UpdateMonitor(ctx context.Context, id, userId string, req mod
 		hasUpdates = true
 	}
 	if req.Interval != nil {
-		m.Interval = *req.Interval
-		q = q.Set("interval = ?", *req.Interval)
+		// 0 = revert to follow-plan (store NULL); any other value is explicit.
+		if *req.Interval == 0 {
+			m.Interval = nil
+			q = q.Set("interval = NULL")
+		} else {
+			v := *req.Interval
+			m.Interval = &v
+			q = q.Set("interval = ?", v)
+		}
 		hasUpdates = true
 	}
 	if req.Timeout != nil {
@@ -255,6 +291,8 @@ func (s *BunStore) ListMonitorRegionStatus(ctx context.Context, monitorId, userI
 	var m Monitor
 	err := s.client.DB.NewSelect().
 		Model(&m).
+		ColumnExpr("m.*").
+		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("id = ?", monitorId).
 		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
 		Scan(ctx)
@@ -276,7 +314,8 @@ func (s *BunStore) ListMonitorRegionStatus(ctx context.Context, monitorId, userI
 	for _, r := range m.Regions {
 		configured[r] = true
 	}
-	staleAfter := time.Duration(m.Interval*models.RegionStaleMultiplier) * time.Second
+	effInterval := models.EffectiveInterval(m.Interval, m.OwnerPlan, m.Timeout)
+	staleAfter := time.Duration(effInterval*models.RegionStaleMultiplier) * time.Second
 
 	out := make([]models.MonitorRegionStatus, 0, len(rows))
 	for i := range rows {
@@ -983,28 +1022,18 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 
 	planScopeSQL := `((user_id = ? AND org_id IS NULL) OR org_id IN (SELECT id FROM organizations WHERE owner_id = ?))`
 
+	// Follow-plan monitors (interval IS NULL) re-resolve their interval at read
+	// time, so a plan change needs no write for them — the upgrade re-grant is
+	// gone entirely. Only explicit overrides still need clamping, and only on a
+	// downgrade: an override below the new floor is raised to it. (An override
+	// is never lowered on upgrade — the user chose that value deliberately.)
 	if newLimits.MinInterval > oldLimits.MinInterval {
 		query := fmt.Sprintf(
 			`UPDATE monitors SET interval = ?, updated_at = now()
-			 WHERE %s AND interval < ?`,
+			 WHERE %s AND interval IS NOT NULL AND interval < ?`,
 			planScopeSQL,
 		)
 		res, err := s.client.DB.NewRaw(query, userId, userId, newLimits.MinInterval, newLimits.MinInterval).Exec(ctx)
-		if err != nil {
-			return total, mapError(err)
-		}
-		rows, err := res.RowsAffected()
-		if err != nil {
-			return total, mapError(err)
-		}
-		total += int(rows)
-	} else if newLimits.MinInterval < oldLimits.MinInterval {
-		query := fmt.Sprintf(
-			`UPDATE monitors SET interval = ?, updated_at = now()
-			 WHERE %s AND interval = ? AND timeout < ?`,
-			planScopeSQL,
-		)
-		res, err := s.client.DB.NewRaw(query, userId, userId, newLimits.MinInterval, oldLimits.MinInterval, newLimits.MinInterval).Exec(ctx)
 		if err != nil {
 			return total, mapError(err)
 		}

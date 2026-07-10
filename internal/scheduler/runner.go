@@ -23,6 +23,7 @@ type checkRunner struct {
 	region     string
 	results    *resultWriter
 	dispatcher *alertDispatcher
+	verifier   *verificationWorker
 }
 
 func newCheckRunner(store models.SchedulerStore, alertManager *alerter.Manager, region string) *checkRunner {
@@ -31,15 +32,18 @@ func newCheckRunner(store models.SchedulerStore, alertManager *alerter.Manager, 
 		region:     region,
 		results:    newResultWriter(store, region),
 		dispatcher: newAlertDispatcher(store, alertManager),
+		verifier:   newVerificationWorker(store, region),
 	}
 }
 
-// stop drains and stops the result writer and the alert dispatcher. Call
-// after all jobs are canceled. Any alerts still queued in the outbox are
-// picked up by another instance's dispatcher, or by this one on restart.
+// stop drains and stops the result writer, the alert dispatcher, and the
+// verification worker. Call after all jobs are canceled. Any alerts still
+// queued in the outbox are picked up by another instance's dispatcher, or by
+// this one on restart.
 func (r *checkRunner) stop() {
 	r.results.stop()
 	r.dispatcher.stop()
+	r.verifier.stop()
 }
 
 // jobLoop checks m on its interval until ctx is canceled. The first check
@@ -106,7 +110,7 @@ func (r *checkRunner) runCheck(ctx context.Context, m *models.Monitor) {
 // per-monitor advisory lock, transitions the global incident, and enqueues
 // alert_outbox rows in the same transaction.
 func (r *checkRunner) recordRegionCheck(ctx context.Context, m *models.Monitor, result *models.CheckResult) string {
-	transition, err := r.store.RecordRegionCheck(ctx, m.ID, r.region, result)
+	transition, err := r.store.RecordRegionCheck(ctx, m.ID, r.region, result, models.SourceScheduled)
 	if err != nil {
 		log.Printf("Failed to record region check for %s: %v", m.ID, err)
 		return "none"
