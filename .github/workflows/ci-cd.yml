@@ -176,7 +176,7 @@ jobs:
             docker compose up -d --build --remove-orphans
             # Health-check in-container: server no longer publishes a host port
             # (Caddy fronts everything).
-            timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://localhost:8080/v1/health >/dev/null; do sleep 3; done'
+            timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://127.0.0.1:8080/v1/health >/dev/null; do sleep 3; done'
 
   deploy-production:
     name: Deploy → Production
@@ -223,4 +223,4 @@ jobs:
             docker compose up -d --build --remove-orphans
             # Health-check in-container: server no longer publishes a host port
             # (Caddy fronts everything).
-            timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://localhost:8080/v1/health >/dev/null; do sleep 3; done'
+            timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://127.0.0.1:8080/v1/health >/dev/null; do sleep 3; done'

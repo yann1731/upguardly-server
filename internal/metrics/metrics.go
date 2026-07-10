@@ -59,6 +59,11 @@ var (
 		Name: "upguardly_ratelimit_redis_errors_total",
 		Help: "Total number of Redis errors in the rate limiter that caused it to fail open (degraded to allowing the request). Non-zero means the global limit is not being reliably enforced.",
 	})
+
+	SubscriptionReconcileFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "upguardly_subscription_reconcile_failures_total",
+		Help: "Total number of failures to re-snap a user's monitors to their new plan limits after a subscription change. The webhook still succeeds (non-fatal), so a non-zero value means some accounts silently kept their old plan's check interval / region cap and need a backfill.",
+	})
 )
 
 func StatusToGaugeValue(status models.Status) float64 {
