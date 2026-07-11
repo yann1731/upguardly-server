@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -51,23 +52,37 @@ func main() {
 	}
 
 	if err := migrator.Lock(ctx); err != nil {
-		log.Fatalf("migrate: lock: %v", err)
+		log.Fatalf("migrate: lock: %v (if no other migrate is running, a crashed run leaked the lock — clear it with: DELETE FROM bun_migration_locks)", err)
 	}
-	defer migrator.Unlock(ctx) //nolint:errcheck
 
+	// Never log.Fatalf while holding the lock: os.Exit skips deferred calls,
+	// leaking the lock row and blocking every future deploy until it is
+	// deleted by hand. Run the work, unlock, then exit.
+	err := runMigrations(ctx, migrator)
+	if uerr := migrator.Unlock(ctx); uerr != nil {
+		log.Printf("[WARN] migrate: unlock: %v", uerr)
+	}
+	if err != nil {
+		db.Disconnect()
+		log.Fatalf("migrate: %v", err)
+	}
+}
+
+func runMigrations(ctx context.Context, migrator *migrate.Migrator) error {
 	if err := baselineIfNeeded(ctx, migrator); err != nil {
-		log.Fatalf("migrate: baseline: %v", err)
+		return fmt.Errorf("baseline: %w", err)
 	}
 
 	group, err := migrator.Migrate(ctx)
 	if err != nil {
-		log.Fatalf("migrate: %v", err)
+		return err
 	}
 	if group.IsZero() {
 		log.Printf("migrate: no new migrations to run")
-		return
+		return nil
 	}
 	log.Printf("migrate: applied %d migration(s) in group #%d", len(group.Migrations), group.ID)
+	return nil
 }
 
 // baselineIfNeeded records migrations up to the prisma→bun cutoff as applied,
