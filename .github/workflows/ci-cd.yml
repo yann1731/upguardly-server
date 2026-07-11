@@ -61,7 +61,7 @@ jobs:
       # applied database.
       - name: Migration check (apply from empty)
         env:
-          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/upguardly_ci"
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/upguardly_ci?sslmode=disable"
         run: go run ./cmd/migrate
 
       # Advisory only (never fails the build): surface destructive DDL in new
