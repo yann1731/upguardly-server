@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -51,36 +52,78 @@ func metricsAuth(token string) gin.HandlerFunc {
 	}
 }
 
+// privateProxies are the ranges the reverse proxy in front of us sits on: the
+// docker-compose bridge network (Caddy) and loopback (container healthcheck).
+var privateProxies = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1/32"}
+
+// cloudflareProxies is Cloudflare's published edge range list
+// (https://www.cloudflare.com/ips/). These must be trusted as *proxies* — not
+// via gin's TrustedPlatform/CF-Connecting-IP shortcut, which reads the header
+// before any peer check and so lets anyone who can reach the origin directly
+// (our Caddy publishes 80/443 to the internet) forge an arbitrary client IP.
+// Trusting them as proxies instead means gin walks X-Forwarded-For right to
+// left and stops at the first untrusted hop: the real client behind Cloudflare,
+// or a direct-to-origin caller's true peer address, which Caddy appends itself
+// and a caller therefore cannot spoof.
+//
+// Refresh from Cloudflare's list if edge ranges change; a stale entry only
+// costs client-IP precision (requests fall back to the edge IP), never safety.
+var cloudflareProxies = []string{
+	// IPv4
+	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+	// IPv6
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+}
+
 // trustedProxies returns the proxy CIDRs/IPs gin should trust for client-IP
-// resolution. TRUSTED_PROXIES is a comma-separated list; when unset it defaults
-// to the standard private ranges (the docker network the reverse proxy uses).
+// resolution. TRUSTED_PROXIES is a comma-separated list of CIDRs/IPs in which
+// the token "cloudflare" expands to Cloudflare's edge ranges, so ops doesn't
+// have to paste 22 CIDRs into an env file:
+//
+//	TRUSTED_PROXIES=172.16.0.0/12,127.0.0.1/32,cloudflare
+//
+// Unset defaults to the private ranges alone — correct for local dev, where
+// there is no CDN in front and the client IP is the peer address.
 func trustedProxies() []string {
-	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
-		parts := strings.Split(v, ",")
-		out := make([]string, 0, len(parts))
-		for _, p := range parts {
-			if p = strings.TrimSpace(p); p != "" {
-				out = append(out, p)
-			}
-		}
-		return out
+	v := os.Getenv("TRUSTED_PROXIES")
+	if v == "" {
+		return privateProxies
 	}
-	return []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1/32"}
+	out := make([]string, 0, len(cloudflareProxies)+len(privateProxies))
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		switch {
+		case p == "":
+		case strings.EqualFold(p, "cloudflare"):
+			out = append(out, cloudflareProxies...)
+		default:
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *stripeservice.Client, availableRegions []string) *gin.Engine {
 	router := gin.Default()
 
-	// Trust only the reverse proxy / load balancer in front of us so that
-	// gin.Context.ClientIP (used by rate limiting) reflects the real client and
-	// cannot be spoofed via X-Forwarded-For. Configure with TRUSTED_PROXIES
-	// (comma-separated CIDRs/IPs); default to private ranges, which covers the
-	// docker-compose bridge network the proxy sits on.
+	// Trust only the proxies actually in front of us — Caddy, and (in production)
+	// Cloudflare's edge — so gin.Context.ClientIP resolves to the real client and
+	// cannot be spoofed via X-Forwarded-For. Rate limiting keys off ClientIP, so
+	// getting this wrong either lumps every user behind one CDN edge IP into a
+	// shared bucket or, worse, lets a caller pick their own key. Configure with
+	// TRUSTED_PROXIES; see trustedProxies.
 	if err := router.SetTrustedProxies(trustedProxies()); err != nil {
-		// A bad CIDR shouldn't crash the server; fall back to gin's default and
-		// log so the misconfiguration is visible.
-		// (gin.Default already logs proxy-trust warnings.)
-		_ = err
+		// Don't leave a misconfigured list silently in place: gin would fall back
+		// to trusting every proxy, which is precisely the spoofable state this
+		// call exists to prevent. Refuse the bad config and keep the safe default.
+		log.Printf("[WARN] router: invalid TRUSTED_PROXIES (%v) — falling back to private ranges only; client IPs behind a CDN will resolve to the edge IP", err)
+		if fbErr := router.SetTrustedProxies(privateProxies); fbErr != nil {
+			log.Fatalf("router: private proxy fallback rejected: %v", fbErr)
+		}
 	}
 
 	router.Use(gin.Recovery())

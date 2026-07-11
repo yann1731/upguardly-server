@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,6 +50,7 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		plan = h.planForUser(c.Request.Context(), userId)
 		n, err := h.store.CountMonitorsByUser(c.Request.Context(), userId)
 		if err != nil {
+			log.Printf("monitors: count monitors for user %s: %v", userId, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
 			return
 		}
@@ -61,6 +63,7 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		plan = h.planForOrg(c.Request.Context(), req.OrgID)
 		n, err := h.store.CountMonitorsByOrg(c.Request.Context(), req.OrgID)
 		if err != nil {
+			log.Printf("monitors: count monitors for org %s: %v", req.OrgID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
 			return
 		}
@@ -112,6 +115,7 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 
 	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, intervalArg, req.Timeout, *req.Enabled, req.Regions)
 	if err != nil {
+		log.Printf("monitors: create monitor for user %s (org %q, type %s, regions %v): %v", userId, req.OrgID, req.Type, req.Regions, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})
 		return
 	}
@@ -128,6 +132,7 @@ func (h *Handlers) ListMonitors(c *gin.Context) {
 
 	monitors, err := h.store.ListMonitors(c.Request.Context(), userId)
 	if err != nil {
+		log.Printf("monitors: list monitors for user %s: %v", userId, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list monitors"})
 		return
 	}
@@ -261,6 +266,7 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
 			return
 		}
+		log.Printf("monitors: update monitor %s for user %s: %v", id, userId, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update monitor"})
 		return
 	}
@@ -314,6 +320,7 @@ func (h *Handlers) GetMonitorResults(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
 			return
 		}
+		log.Printf("monitors: get results for monitor %s (user %s, region %q): %v", id, userId, region, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get results"})
 		return
 	}
@@ -343,6 +350,7 @@ func (h *Handlers) GetMonitorIncidents(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
 			return
 		}
+		log.Printf("monitors: list incidents for monitor %s (user %s): %v", id, userId, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get incidents"})
 		return
 	}
@@ -379,6 +387,7 @@ func (h *Handlers) GetMonitorStats(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
 			return
 		}
+		log.Printf("monitors: get stats for monitor %s (user %s): %v", id, userId, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get stats"})
 		return
 	}

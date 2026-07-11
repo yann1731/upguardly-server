@@ -9,7 +9,7 @@ import (
 type Organization struct {
 	bun.BaseModel `bun:"table:organizations,alias:o"`
 
-	ID        string    `bun:"id,pk,default:cuid()"`
+	ID        string    `bun:"id,pk"`
 	Name      string    `bun:"name,unique,notnull"`
 	OwnerID   string    `bun:"owner_id,notnull"`
 	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
@@ -19,7 +19,7 @@ type Organization struct {
 type OrganizationMember struct {
 	bun.BaseModel `bun:"table:organization_members,alias:om"`
 
-	ID             string    `bun:"id,pk,default:cuid()"`
+	ID             string    `bun:"id,pk"`
 	OrganizationID string    `bun:"organization_id,notnull"`
 	UserID         string    `bun:"user_id,unique,notnull"`
 	Role           string    `bun:"role,notnull,default:'MEMBER'"`
@@ -29,7 +29,7 @@ type OrganizationMember struct {
 type Invitation struct {
 	bun.BaseModel `bun:"table:invitations,alias:i"`
 
-	ID             string    `bun:"id,pk,default:cuid()"`
+	ID             string    `bun:"id,pk"`
 	OrganizationID string    `bun:"organization_id,notnull"`
 	Email          string    `bun:"email,notnull"`
 	Role           string    `bun:"role,notnull,default:'MEMBER'"`
@@ -43,7 +43,7 @@ type Invitation struct {
 type Subscription struct {
 	bun.BaseModel `bun:"table:subscriptions,alias:s"`
 
-	ID                   string     `bun:"id,pk,default:cuid()"`
+	ID                   string     `bun:"id,pk"`
 	UserID               string     `bun:"user_id,unique,notnull"`
 	Plan                 string     `bun:"plan,notnull,default:'FREE'"`
 	Status               string     `bun:"status,notnull,default:'ACTIVE'"`
@@ -59,7 +59,7 @@ type Subscription struct {
 type Monitor struct {
 	bun.BaseModel `bun:"table:monitors,alias:m"`
 
-	ID     string  `bun:"id,pk,default:cuid()"`
+	ID     string  `bun:"id,pk"`
 	UserID string  `bun:"user_id,notnull"`
 	OrgID  *string `bun:"org_id"`
 	Name   string  `bun:"name,notnull"`
@@ -95,7 +95,7 @@ type MonitorResultRollup struct {
 type MonitorResult struct {
 	bun.BaseModel `bun:"table:monitor_results,alias:mr"`
 
-	ID         string    `bun:"id,pk,default:cuid()"`
+	ID         string    `bun:"id,pk"`
 	MonitorID  string    `bun:"monitor_id,notnull"`
 	Status     string    `bun:"status,notnull"`
 	Latency    int       `bun:"latency,notnull"`
@@ -121,7 +121,7 @@ type MonitorRegionStatus struct {
 type Incident struct {
 	bun.BaseModel `bun:"table:incidents,alias:inc"`
 
-	ID         string     `bun:"id,pk,default:cuid()"`
+	ID         string     `bun:"id,pk"`
 	MonitorID  string     `bun:"monitor_id,notnull"`
 	Status     string     `bun:"status,notnull"`
 	StartedAt  time.Time  `bun:"started_at,nullzero,notnull,default:current_timestamp"`
@@ -134,7 +134,7 @@ type Incident struct {
 type Alert struct {
 	bun.BaseModel `bun:"table:alerts,alias:al"`
 
-	ID        string    `bun:"id,pk,default:cuid()"`
+	ID        string    `bun:"id,pk"`
 	MonitorID string    `bun:"monitor_id,notnull"`
 	Channel   string    `bun:"channel,notnull"`
 	Target    string    `bun:"target,notnull"`
@@ -145,7 +145,7 @@ type Alert struct {
 type NotificationChannel struct {
 	bun.BaseModel `bun:"table:notification_channels,alias:nc"`
 
-	ID        string    `bun:"id,pk,default:cuid()"`
+	ID        string    `bun:"id,pk"`
 	UserID    string    `bun:"user_id,notnull"`
 	Channel   string    `bun:"channel,notnull"`
 	Target    string    `bun:"target,notnull"`
@@ -157,7 +157,7 @@ type NotificationChannel struct {
 type MonitorChannelSetting struct {
 	bun.BaseModel `bun:"table:monitor_channel_settings,alias:mcs"`
 
-	ID                    string    `bun:"id,pk,default:cuid()"`
+	ID                    string    `bun:"id,pk"`
 	MonitorID             string    `bun:"monitor_id,notnull"`
 	NotificationChannelID string    `bun:"notification_channel_id,notnull"`
 	Enabled               bool      `bun:"enabled,notnull"`
@@ -168,7 +168,7 @@ type MonitorChannelSetting struct {
 type AlertOutbox struct {
 	bun.BaseModel `bun:"table:alert_outbox,alias:ao"`
 
-	ID                    string    `bun:"id,pk,default:cuid()"`
+	ID                    string    `bun:"id,pk"`
 	AlertID               *string   `bun:"alert_id"`
 	NotificationChannelID *string   `bun:"notification_channel_id"`
 	MonitorID             string    `bun:"monitor_id,notnull"`
@@ -189,7 +189,7 @@ type AlertOutbox struct {
 type AlertHistory struct {
 	bun.BaseModel `bun:"table:alert_history,alias:ah"`
 
-	ID                    string    `bun:"id,default:cuid()"`
+	ID                    string    `bun:"id"`
 	AlertID               *string   `bun:"alert_id"`
 	NotificationChannelID *string   `bun:"notification_channel_id"`
 	Status                string    `bun:"status,notnull"`

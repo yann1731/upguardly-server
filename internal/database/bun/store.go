@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -59,17 +60,19 @@ func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monit
 		orgIDPtr = &orgId
 	}
 	m := &Monitor{
-		UserID:   userId,
-		OrgID:    orgIDPtr,
-		Name:     name,
-		Type:     monitorType,
-		Target:   target,
-		Interval: interval,
-		Timeout:  timeout,
-		Enabled:  enabled,
-		Regions:  regions,
+		ID:        uuid.NewString(),
+		UserID:    userId,
+		OrgID:     orgIDPtr,
+		Name:      name,
+		Type:      monitorType,
+		Target:    target,
+		Interval:  interval,
+		Timeout:   timeout,
+		Enabled:   enabled,
+		Regions:   regions,
+		UpdatedAt: time.Now(),
 	}
-	if err := s.client.DB.NewInsert().Model(m).ExcludeColumn("id", "created_at", "updated_at", "owner_plan").Returning("*").Scan(ctx); err != nil {
+	if err := s.client.DB.NewInsert().Model(m).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 		return nil, mapError(err)
 	}
 	// Returning("*") doesn't include the computed owner_plan; resolve it so the
@@ -495,12 +498,14 @@ func (s *BunStore) GetMonitorStats(ctx context.Context, monitorId, userId string
 
 func (s *BunStore) CreateNotificationChannel(ctx context.Context, userId, channel, target string, enabled bool) (*models.NotificationChannel, error) {
 	nc := &NotificationChannel{
-		UserID:  userId,
-		Channel: channel,
-		Target:  target,
-		Enabled: enabled,
+		ID:        uuid.NewString(),
+		UserID:    userId,
+		Channel:   channel,
+		Target:    target,
+		Enabled:   enabled,
+		UpdatedAt: time.Now(),
 	}
-	if err := s.client.DB.NewInsert().Model(nc).ExcludeColumn("id", "created_at", "updated_at").Returning("*").Scan(ctx); err != nil {
+	if err := s.client.DB.NewInsert().Model(nc).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 		return nil, mapError(err)
 	}
 	model := nc.toModel()
@@ -631,13 +636,15 @@ func (s *BunStore) ListMonitorChannelSettings(ctx context.Context, monitorId str
 
 func (s *BunStore) UpsertMonitorChannelSetting(ctx context.Context, monitorId, channelId string, enabled bool) (*models.MonitorChannelSetting, error) {
 	mcs := &MonitorChannelSetting{
+		ID:                    uuid.NewString(),
 		MonitorID:             monitorId,
 		NotificationChannelID: channelId,
 		Enabled:               enabled,
+		UpdatedAt:             time.Now(),
 	}
 	err := s.client.DB.NewInsert().
 		Model(mcs).
-		ExcludeColumn("id", "created_at", "updated_at").
+		ExcludeColumn("created_at").
 		On("CONFLICT (monitor_id, notification_channel_id) DO UPDATE").
 		Set("enabled = EXCLUDED.enabled").
 		Set("updated_at = NOW()").
@@ -671,19 +678,22 @@ func (s *BunStore) CreateOrganization(ctx context.Context, userId, name string) 
 
 	err := s.client.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		org = Organization{
-			Name:    name,
-			OwnerID: userId,
+			ID:        uuid.NewString(),
+			Name:      name,
+			OwnerID:   userId,
+			UpdatedAt: time.Now(),
 		}
-		if err := tx.NewInsert().Model(&org).ExcludeColumn("id", "created_at", "updated_at").Returning("*").Scan(ctx); err != nil {
+		if err := tx.NewInsert().Model(&org).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 			return err
 		}
 
 		member = OrganizationMember{
+			ID:             uuid.NewString(),
 			OrganizationID: org.ID,
 			UserID:         userId,
 			Role:           "OWNER",
 		}
-		if err := tx.NewInsert().Model(&member).ExcludeColumn("id", "created_at").Returning("*").Scan(ctx); err != nil {
+		if err := tx.NewInsert().Model(&member).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 			return err
 		}
 		return nil
@@ -848,6 +858,7 @@ func (s *BunStore) RemoveMember(ctx context.Context, orgId, userId string) error
 
 func (s *BunStore) CreateInvitation(ctx context.Context, orgId, email, invitedBy string, role models.OrgRole, token string, expiresAt time.Time) (*models.Invitation, error) {
 	inv := &Invitation{
+		ID:             uuid.NewString(),
 		OrganizationID: orgId,
 		Email:          email,
 		Role:           string(role),
@@ -856,7 +867,7 @@ func (s *BunStore) CreateInvitation(ctx context.Context, orgId, email, invitedBy
 		InvitedBy:      invitedBy,
 		ExpiresAt:      expiresAt,
 	}
-	if err := s.client.DB.NewInsert().Model(inv).ExcludeColumn("id", "created_at").Returning("*").Scan(ctx); err != nil {
+	if err := s.client.DB.NewInsert().Model(inv).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 		return nil, mapError(err)
 	}
 	model := inv.toModel()
@@ -919,11 +930,12 @@ func (s *BunStore) AcceptInvitation(ctx context.Context, token, userId string) (
 		}
 
 		member = OrganizationMember{
+			ID:             uuid.NewString(),
 			OrganizationID: inv.OrganizationID,
 			UserID:         userId,
 			Role:           inv.Role,
 		}
-		if err := tx.NewInsert().Model(&member).ExcludeColumn("id", "created_at").Returning("*").Scan(ctx); err != nil {
+		if err := tx.NewInsert().Model(&member).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 			return err
 		}
 
@@ -983,6 +995,7 @@ func (s *BunStore) GetSubscriptionByUser(ctx context.Context, userId string) (*m
 
 func (s *BunStore) UpsertSubscription(ctx context.Context, params models.UpsertSubscriptionParams) (*models.Subscription, error) {
 	sub := &Subscription{
+		ID:                   uuid.NewString(),
 		UserID:               params.UserID,
 		Plan:                 params.Plan,
 		Status:               params.Status,
@@ -991,11 +1004,12 @@ func (s *BunStore) UpsertSubscription(ctx context.Context, params models.UpsertS
 		StripePriceID:        params.StripePriceID,
 		CurrentPeriodStart:   params.CurrentPeriodStart,
 		CurrentPeriodEnd:     params.CurrentPeriodEnd,
+		UpdatedAt:            time.Now(),
 	}
 
 	err := s.client.DB.NewInsert().
 		Model(sub).
-		ExcludeColumn("id", "created_at", "updated_at").
+		ExcludeColumn("created_at").
 		On("CONFLICT (user_id) DO UPDATE").
 		Set("plan = EXCLUDED.plan").
 		Set("status = EXCLUDED.status").
