@@ -70,7 +70,7 @@ type Monitor struct {
 	Interval  *int      `bun:"interval"`
 	Timeout   int       `bun:"timeout,notnull,default:30"`
 	Enabled   bool      `bun:"enabled,notnull,default:true"`
-	Regions   []string  `bun:"regions,array,default:'{\"ca-east\"}'"`
+	Regions   []string  `bun:"regions,array,default:'{ca-east}'"`
 	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 	UpdatedAt time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 
