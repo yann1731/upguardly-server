@@ -224,6 +224,12 @@ func (m *mockStore) GetSubscriptionByUser(_ context.Context, _ string) (*models.
 	}
 	return m.subResult, m.subErr
 }
+func (m *mockStore) GetSubscriptionByCustomerID(_ context.Context, _ string) (*models.Subscription, error) {
+	if m.subResult == nil && m.subErr == nil {
+		return nil, models.ErrNotFound
+	}
+	return m.subResult, m.subErr
+}
 func (m *mockStore) UpsertSubscription(_ context.Context, params models.UpsertSubscriptionParams) (*models.Subscription, error) {
 	m.lastUpsertSub = &params
 	if m.subErr != nil {

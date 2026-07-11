@@ -2,6 +2,7 @@ package bun
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -14,6 +15,13 @@ type Client struct {
 
 func NewClient(dsn string) *Client {
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+
+	// Configure connection pooling
+	sqldb.SetMaxOpenConns(20)
+	sqldb.SetMaxIdleConns(10)
+	sqldb.SetConnMaxLifetime(30 * time.Minute)
+	sqldb.SetConnMaxIdleTime(5 * time.Minute)
+
 	db := bun.NewDB(sqldb, pgdialect.New())
 	return &Client{DB: db}
 }

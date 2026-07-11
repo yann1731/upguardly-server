@@ -38,7 +38,7 @@ func (c *Client) PriceIDForPlan(plan string) (string, error) {
 // EnsureCustomer looks up or creates the Stripe customer for a user (the
 // billing subject), keyed on user_id metadata. The metadata is what the
 // subscription webhooks resolve the subscription back to.
-func (c *Client) EnsureCustomer(userID, name string) (string, error) {
+func (c *Client) EnsureCustomer(userID, email string) (string, error) {
 	if id, err := c.FindCustomerByUser(userID); err != nil {
 		return "", err
 	} else if id != "" {
@@ -46,8 +46,8 @@ func (c *Client) EnsureCustomer(userID, name string) (string, error) {
 	}
 
 	params := &stripe.CustomerParams{}
-	if name != "" {
-		params.Name = stripe.String(name)
+	if email != "" {
+		params.Email = stripe.String(email)
 	}
 	params.AddMetadata("user_id", userID)
 

@@ -993,6 +993,19 @@ func (s *BunStore) GetSubscriptionByUser(ctx context.Context, userId string) (*m
 	return &model, nil
 }
 
+func (s *BunStore) GetSubscriptionByCustomerID(ctx context.Context, customerID string) (*models.Subscription, error) {
+	var sub Subscription
+	err := s.client.DB.NewSelect().
+		Model(&sub).
+		Where("stripe_customer_id = ?", customerID).
+		Scan(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	model := sub.toModel()
+	return &model, nil
+}
+
 func (s *BunStore) UpsertSubscription(ctx context.Context, params models.UpsertSubscriptionParams) (*models.Subscription, error) {
 	sub := &Subscription{
 		ID:                   uuid.NewString(),

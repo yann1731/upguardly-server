@@ -9,7 +9,7 @@ type StripeService interface {
 	PriceIDForPlan(plan string) (string, error)
 	// EnsureCustomer looks up or creates the Stripe customer for a user (the
 	// billing subject), keyed on user_id metadata.
-	EnsureCustomer(userID, name string) (string, error)
+	EnsureCustomer(userID, email string) (string, error)
 	CreateCheckoutSession(customerID, priceID, successURL, cancelURL string) (string, error)
 	CreatePortalSession(customerID, returnURL string) (string, error)
 	ParseWebhook(payload []byte, sig string) (stripe.Event, error)

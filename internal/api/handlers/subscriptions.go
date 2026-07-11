@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stripe/stripe-go/v76"
+	"github.com/supertokens/supertokens-golang/recipe/emailpassword"
 
 	"upguardly-backend/internal/api/middleware"
 	"upguardly-backend/internal/metrics"
@@ -241,7 +242,11 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 	if subErr == nil && dbSub.StripeCustomerID != nil && *dbSub.StripeCustomerID != "" {
 		customerID = *dbSub.StripeCustomerID
 	} else {
-		customerID, err = h.stripe.EnsureCustomer(userId, "")
+		var email string
+		if u, uErr := emailpassword.GetUserByID(userId); uErr == nil && u != nil {
+			email = u.Email
+		}
+		customerID, err = h.stripe.EnsureCustomer(userId, email)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create billing customer"})
 			return
@@ -407,7 +412,7 @@ func (h *Handlers) handleSubscriptionUpdated(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	userID, ok := h.getUserIDFromCustomer(sub.Customer)
+	userID, ok := h.getUserIDFromCustomer(c.Request.Context(), sub.Customer)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
@@ -434,7 +439,7 @@ func (h *Handlers) handleSubscriptionDeleted(c *gin.Context, event stripe.Event)
 		return
 	}
 
-	userID, ok := h.getUserIDFromCustomer(sub.Customer)
+	userID, ok := h.getUserIDFromCustomer(c.Request.Context(), sub.Customer)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
@@ -464,7 +469,7 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		return
 	}
 
-	userID, ok := h.getUserIDFromCustomer(inv.Customer)
+	userID, ok := h.getUserIDFromCustomer(c.Request.Context(), inv.Customer)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
@@ -561,7 +566,7 @@ func (h *Handlers) planFromPriceID(priceID string) (string, error) {
 	return "", fmt.Errorf("unrecognised price ID: %s", priceID)
 }
 
-func (h *Handlers) getUserIDFromCustomer(customer *stripe.Customer) (string, bool) {
+func (h *Handlers) getUserIDFromCustomer(ctx context.Context, customer *stripe.Customer) (string, bool) {
 	if customer == nil {
 		return "", false
 	}
@@ -570,8 +575,11 @@ func (h *Handlers) getUserIDFromCustomer(customer *stripe.Customer) (string, boo
 			return id, true
 		}
 	}
-	// Webhook payloads typically don't expand the Customer object, so Metadata is nil.
-	// We must fetch the Customer from Stripe to read its metadata.
+	// 1. Try local DB lookup first (extremely fast and avoids blocking network call)
+	if sub, err := h.store.GetSubscriptionByCustomerID(ctx, customer.ID); err == nil && sub.StripeCustomerID != nil && *sub.StripeCustomerID != "" {
+		return sub.UserID, true
+	}
+	// 2. Fall back to Stripe API only if DB doesn't have it yet (e.g. brand new signup race)
 	cust, err := h.stripe.GetCustomer(customer.ID)
 	if err != nil || cust == nil {
 		return "", false

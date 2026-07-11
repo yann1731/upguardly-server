@@ -65,6 +65,7 @@ type Store interface {
 
 	// Subscriptions (keyed on the user — the billing subject)
 	GetSubscriptionByUser(ctx context.Context, userId string) (*Subscription, error)
+	GetSubscriptionByCustomerID(ctx context.Context, customerID string) (*Subscription, error)
 	UpsertSubscription(ctx context.Context, params UpsertSubscriptionParams) (*Subscription, error)
 	// ReconcileMonitorsToPlan snaps the monitors governed by the user's plan
 	// (solo + owned-org monitors) to the new plan's limits after an effective
