@@ -52,7 +52,7 @@ func insertMonitor(t *testing.T, s *BunStore, userID string, interval, timeout i
 		Name:      "reconcile-" + uuid.NewString()[:8],
 		Type:      string(models.MonitorTypeHTTP),
 		Target:    "https://example.com",
-		Interval:  interval,
+		Interval:  &interval,
 		Timeout:   timeout,
 		Enabled:   true,
 		Regions:   regions,
@@ -77,28 +77,25 @@ func monitorRow(t *testing.T, s *BunStore, id string) *Monitor {
 	return m
 }
 
-// Upgrade FREE->PRO must lower monitors sitting at the FREE floor (300s) to the
-// PRO floor (60s), but only when their timeout still fits the new interval.
-func TestReconcileUpgradeLowersInterval(t *testing.T) {
+// Upgrade FREE->PRO must NOT touch explicit interval overrides: follow-plan
+// monitors (interval IS NULL) re-resolve at read time, and an override is
+// never lowered on upgrade — the user chose that value deliberately.
+func TestReconcileUpgradeLeavesOverrides(t *testing.T) {
 	s := reconcileTestStore(t)
 	ctx := context.Background()
 	user := "reconcile-up-" + uuid.NewString()
 
-	pinned := insertMonitor(t, s, user, 300, 30, []string{"na-east"})      // eligible: timeout 30 < 60
-	bigTimeout := insertMonitor(t, s, user, 300, 120, []string{"na-east"}) // ineligible: timeout 120 >= 60
+	pinned := insertMonitor(t, s, user, 300, 30, []string{"ca-east"})
 
 	n, err := s.ReconcileMonitorsToPlan(ctx, user, "FREE", "PRO")
 	if err != nil {
 		t.Fatalf("reconcile FREE->PRO: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("adjusted monitors: got %d, want 1", n)
+	if n != 0 {
+		t.Errorf("adjusted monitors: got %d, want 0", n)
 	}
-	if got := monitorRow(t, s, pinned).Interval; got != 60 {
-		t.Errorf("pinned monitor interval: got %d, want 60", got)
-	}
-	if got := monitorRow(t, s, bigTimeout).Interval; got != 300 {
-		t.Errorf("big-timeout monitor interval: got %d, want 300 (unchanged)", got)
+	if got := monitorRow(t, s, pinned).Interval; got == nil || *got != 300 {
+		t.Errorf("pinned monitor interval: got %v, want 300 (unchanged)", got)
 	}
 }
 
@@ -109,7 +106,7 @@ func TestReconcileDowngradeRaisesInterval(t *testing.T) {
 	ctx := context.Background()
 	user := "reconcile-down-" + uuid.NewString()
 
-	fast := insertMonitor(t, s, user, 60, 30, []string{"na-east"})
+	fast := insertMonitor(t, s, user, 60, 30, []string{"ca-east"})
 
 	n, err := s.ReconcileMonitorsToPlan(ctx, user, "PRO", "FREE")
 	if err != nil {
@@ -118,8 +115,8 @@ func TestReconcileDowngradeRaisesInterval(t *testing.T) {
 	if n != 1 {
 		t.Errorf("adjusted monitors: got %d, want 1", n)
 	}
-	if got := monitorRow(t, s, fast).Interval; got != 300 {
-		t.Errorf("fast monitor interval: got %d, want 300", got)
+	if got := monitorRow(t, s, fast).Interval; got == nil || *got != 300 {
+		t.Errorf("fast monitor interval: got %v, want 300", got)
 	}
 }
 
@@ -130,7 +127,7 @@ func TestReconcileDowngradeTrimsRegions(t *testing.T) {
 	ctx := context.Background()
 	user := "reconcile-region-" + uuid.NewString()
 
-	multi := insertMonitor(t, s, user, 60, 30, []string{"na-east", "eu-west"})
+	multi := insertMonitor(t, s, user, 60, 30, []string{"ca-east", "eu-west-fr"})
 
 	if _, err := s.ReconcileMonitorsToPlan(ctx, user, "PRO", "FREE"); err != nil {
 		t.Fatalf("reconcile PRO->FREE: %v", err)

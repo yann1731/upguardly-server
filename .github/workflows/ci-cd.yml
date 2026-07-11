@@ -179,6 +179,9 @@ jobs:
             timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://127.0.0.1:8080/v1/health >/dev/null; do sleep 3; done'
 
   deploy-production:
+    # NOTE: deploy-satellites below `needs` this job — satellite pools must
+    # never run an image tag whose migrations haven't been applied on the
+    # primary (satellites start with RUN_MIGRATIONS=false).
     name: Deploy → Production
     # Production ships only on v* tags. `build` also runs for main pushes (for
     # staging), so this `if` is required to keep main off production.
@@ -224,3 +227,47 @@ jobs:
             # Health-check in-container: server no longer publishes a host port
             # (Caddy fronts everything).
             timeout 60 bash -c 'until docker compose exec -T server wget -qO- http://127.0.0.1:8080/v1/health >/dev/null; do sleep 3; done'
+
+  deploy-satellites:
+    name: Deploy → Satellites
+    # Satellite scheduler pools (deploy/satellite/ in the deploy repo), one
+    # GitHub environment per region — satellite-<region> holds SATELLITE_HOST/
+    # USER/SSH_KEY/PORT; GHCR_PULL_* are repo-level and shared. Runs strictly
+    # AFTER deploy-production so the tag's migrations exist before any
+    # satellite runs it (schedulers skip migrations via RUN_MIGRATIONS=false).
+    needs: deploy-production
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      # One region at a time (runbook rule: bring satellites up/roll them
+      # serially and watch quorum), and one failure doesn't block the rest.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        region: [us-west, eu-west-fr, eu-west-de]
+    environment: satellite-${{ matrix.region }}
+    steps:
+      - id: tag
+        run: echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SATELLITE_HOST }}
+          username: ${{ secrets.SATELLITE_USER }}
+          key: ${{ secrets.SATELLITE_SSH_KEY }}
+          port: ${{ secrets.SATELLITE_PORT }}
+          script: |
+            set -euo pipefail
+            cd /opt/upguardly/satellite
+            echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_PULL_USER }} --password-stdin
+            sed -i "s|^SERVER_IMAGE_TAG=.*|SERVER_IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}|" .env
+            docker compose pull
+            # Stop-then-start, NEVER a rolling swap: an old and a new scheduler
+            # instance live at once in the same region each claim every
+            # partition and double-check/double-alert.
+            docker compose stop scheduler
+            docker compose up -d --remove-orphans
+            # The scheduler is healthy iff it registered in the region-scoped
+            # etcd prefix (lease TTL 10s, so registration is near-immediate).
+            region=$(grep '^SCHEDULER_REGION=' .env | cut -d= -f2)
+            timeout 60 bash -c "until docker compose exec -T etcd etcdctl get --prefix /upguardly/schedulers/${region}/instances/ --keys-only | grep -q .; do sleep 3; done"

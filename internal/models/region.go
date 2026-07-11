@@ -15,16 +15,22 @@ type Region struct {
 
 // Regions is the static registry of known regions. IDs are stored on
 // monitors and results, so entries must never be renamed — only added.
+// (Broken exactly once, deliberately: na-east → ca-east, with a full data
+// migration — 20260709120000_rename_na_east_to_ca_east. eu-west and
+// ap-southeast were dropped at the same time; they were never in
+// AVAILABLE_REGIONS and had no data. Any future rename needs the same
+// treatment: every region-bearing table AND its column defaults.)
 var Regions = []Region{
-	{ID: "na-east", Name: "North America (East)"},
-	{ID: "eu-west", Name: "EU West"},
-	{ID: "ap-southeast", Name: "Asia Pacific"},
+	{ID: "ca-east", Name: "Canada (East)"},
+	{ID: "us-west", Name: "US West"},
+	{ID: "eu-west-fr", Name: "Europe (France)"},
+	{ID: "eu-west-de", Name: "Europe (Germany)"},
 }
 
 // DefaultRegion is the region assumed for everything that predates
 // multi-region: existing monitors and results are backfilled to it, and a
 // scheduler without SCHEDULER_REGION runs as it.
-const DefaultRegion = "na-east"
+const DefaultRegion = "ca-east"
 
 func ValidRegion(id string) bool {
 	_, ok := RegionByID(id)

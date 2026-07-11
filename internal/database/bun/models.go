@@ -70,7 +70,7 @@ type Monitor struct {
 	Interval  *int      `bun:"interval"`
 	Timeout   int       `bun:"timeout,notnull,default:30"`
 	Enabled   bool      `bun:"enabled,notnull,default:true"`
-	Regions   []string  `bun:"regions,array,default:'{\"na-east\"}'"`
+	Regions   []string  `bun:"regions,array,default:'{\"ca-east\"}'"`
 	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 	UpdatedAt time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 
@@ -84,7 +84,7 @@ type MonitorResultRollup struct {
 	bun.BaseModel `bun:"table:monitor_result_rollups,alias:mrr"`
 
 	MonitorID  string    `bun:"monitor_id,pk"`
-	Region     string    `bun:"region,pk,default:'na-east'"`
+	Region     string    `bun:"region,pk,default:'ca-east'"`
 	Bucket     time.Time `bun:"bucket,pk"`
 	Checks     int       `bun:"checks,notnull"`
 	SumLatency int       `bun:"sum_latency,notnull"`
@@ -101,7 +101,7 @@ type MonitorResult struct {
 	Latency    int       `bun:"latency,notnull"`
 	StatusCode *int      `bun:"status_code"`
 	Message    *string   `bun:"message"`
-	Region     string    `bun:"region,notnull,default:'na-east'"`
+	Region     string    `bun:"region,notnull,default:'ca-east'"`
 	CheckedAt  time.Time `bun:"checked_at,pk,nullzero,notnull,default:current_timestamp"`
 }
 

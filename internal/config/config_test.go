@@ -13,10 +13,10 @@ func TestParseAvailableRegions(t *testing.T) {
 		raw  string
 		want []string
 	}{
-		{"single", "na-east", []string{"na-east"}},
-		{"multiple with spaces", " na-east , eu-west ", []string{"na-east", "eu-west"}},
-		{"dedupes", "na-east,na-east,eu-west", []string{"na-east", "eu-west"}},
-		{"drops unknown", "na-east,mars-north", []string{"na-east"}},
+		{"single", "ca-east", []string{"ca-east"}},
+		{"multiple with spaces", " ca-east , us-west ", []string{"ca-east", "us-west"}},
+		{"dedupes", "ca-east,ca-east,us-west", []string{"ca-east", "us-west"}},
+		{"drops unknown", "ca-east,mars-north", []string{"ca-east"}},
 		{"all unknown falls back to default", "mars-north,venus-south", []string{models.DefaultRegion}},
 		{"empty falls back to default", "", []string{models.DefaultRegion}},
 	}

@@ -154,7 +154,7 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["na-east","eu-west"]}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["ca-east","eu-west-fr"]}`)
 
 		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
@@ -164,10 +164,10 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["na-east","eu-west"]}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["ca-east","eu-west-fr"]}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.Equal(t, []string{"na-east", "eu-west"}, store.lastCreateRegions)
+		assert.Equal(t, []string{"ca-east", "eu-west-fr"}, store.lastCreateRegions)
 	})
 
 	t.Run("unknown region returns 400", func(t *testing.T) {
@@ -186,10 +186,10 @@ func TestCreateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["na-east","na-east"]}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["ca-east","ca-east"]}`)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.Equal(t, []string{"na-east"}, store.lastCreateRegions)
+		assert.Equal(t, []string{"ca-east"}, store.lastCreateRegions)
 	})
 }
 
@@ -278,7 +278,7 @@ func TestUpdateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
 
-		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":["na-east","eu-west"]}`)
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":["ca-east","eu-west-fr"]}`)
 
 		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
@@ -288,12 +288,12 @@ func TestUpdateMonitor(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
 
-		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":["na-east","eu-west"]}`)
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"regions":["ca-east","eu-west-fr"]}`)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		require.NotNil(t, store.lastUpdateReq)
 		require.NotNil(t, store.lastUpdateReq.Regions)
-		assert.Equal(t, []string{"na-east", "eu-west"}, *store.lastUpdateReq.Regions)
+		assert.Equal(t, []string{"ca-east", "eu-west-fr"}, *store.lastUpdateReq.Regions)
 	})
 
 	t.Run("empty regions list returns 400", func(t *testing.T) {

@@ -29,7 +29,7 @@ func newRegionRouter(store *mockStore, available []string) (*gin.Engine, *handle
 
 func TestListRegions(t *testing.T) {
 	t.Run("returns only available regions with display names", func(t *testing.T) {
-		router, h := newRegionRouter(&mockStore{}, []string{"na-east", "eu-west"})
+		router, h := newRegionRouter(&mockStore{}, []string{"ca-east", "us-west"})
 		router.GET("/v1/regions", h.ListRegions)
 
 		w := doRequest(router, "GET", "/v1/regions", "")
@@ -38,20 +38,20 @@ func TestListRegions(t *testing.T) {
 		var got []models.Region
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 		require.Len(t, got, 2)
-		assert.Equal(t, models.Region{ID: "na-east", Name: "North America (East)"}, got[0])
-		assert.Equal(t, models.Region{ID: "eu-west", Name: "EU West"}, got[1])
+		assert.Equal(t, models.Region{ID: "ca-east", Name: "Canada (East)"}, got[0])
+		assert.Equal(t, models.Region{ID: "us-west", Name: "US West"}, got[1])
 	})
 }
 
 func TestCreateMonitorRegionAvailability(t *testing.T) {
 	t.Run("registry region without a deployed pool returns 400", func(t *testing.T) {
-		// eu-west is a valid registry region but not in AVAILABLE_REGIONS:
+		// us-west is a valid registry region but not in AVAILABLE_REGIONS:
 		// selecting it must fail rather than silently never reach quorum.
 		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
-		router, h := newRegionRouter(store, []string{"na-east"})
+		router, h := newRegionRouter(store, []string{"ca-east"})
 		router.POST("/v1/monitors", h.CreateMonitor)
 
-		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["eu-west"]}`)
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","regions":["us-west"]}`)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
@@ -61,8 +61,8 @@ func TestGetMonitorRegions(t *testing.T) {
 	t.Run("returns per-region status", func(t *testing.T) {
 		code := 200
 		store := &mockStore{regionStatusResult: []models.MonitorRegionStatus{
-			{Region: "eu-west", Status: models.StatusUP, Latency: 42, StatusCode: &code, CheckedAt: time.Now(), Stale: false},
-			{Region: "na-east", Status: models.StatusDOWN, Latency: 0, CheckedAt: time.Now().Add(-time.Hour), Stale: true},
+			{Region: "us-west", Status: models.StatusUP, Latency: 42, StatusCode: &code, CheckedAt: time.Now(), Stale: false},
+			{Region: "ca-east", Status: models.StatusDOWN, Latency: 0, CheckedAt: time.Now().Add(-time.Hour), Stale: true},
 		}}
 		router, h := newTestRouter(store)
 		router.GET("/v1/monitors/:id/regions", h.GetMonitorRegions)
@@ -73,7 +73,7 @@ func TestGetMonitorRegions(t *testing.T) {
 		var got []models.MonitorRegionStatus
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 		require.Len(t, got, 2)
-		assert.Equal(t, "eu-west", got[0].Region)
+		assert.Equal(t, "us-west", got[0].Region)
 		assert.False(t, got[0].Stale)
 		assert.True(t, got[1].Stale)
 	})
@@ -95,10 +95,10 @@ func TestGetMonitorResultsRegionFilter(t *testing.T) {
 		router, h := newTestRouter(store)
 		router.GET("/v1/monitors/:id/results", h.GetMonitorResults)
 
-		w := doRequest(router, "GET", "/v1/monitors/mon-1/results?region=eu-west", "")
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/results?region=us-west", "")
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Equal(t, "eu-west", store.lastResultsRegion)
+		assert.Equal(t, "us-west", store.lastResultsRegion)
 	})
 
 	t.Run("unknown region returns 400", func(t *testing.T) {

@@ -46,7 +46,7 @@ func createTestMonitor(t *testing.T, dbc *bundb.Client, suffix string, regions .
 	t.Helper()
 	ctx := context.Background()
 	if len(regions) == 0 {
-		regions = []string{"na-east"}
+		regions = []string{"ca-east"}
 	}
 	m := &bundb.Monitor{
 		ID:        uuid.NewString(),
@@ -162,39 +162,39 @@ func openIncidents(t *testing.T, dbc *bundb.Client, monitorID string) []bundb.In
 // "fresh" runner, since all state now lives in Postgres.
 func TestRegionCheckSingleRegionTransitions(t *testing.T) {
 	dbc := integrationDB(t)
-	m := createTestMonitor(t, dbc, fmt.Sprintf("inc-%d", time.Now().UnixNano()), "na-east")
-	// Single-region deployment: only na-east is active, so there is nothing to
+	m := createTestMonitor(t, dbc, fmt.Sprintf("inc-%d", time.Now().UnixNano()), "ca-east")
+	// Single-region deployment: only ca-east is active, so there is nothing to
 	// confirm with — the monitor alerts on its own region, as before.
-	seedHeartbeats(t, dbc, "na-east")
+	seedHeartbeats(t, dbc, "ca-east")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "Server error"}
 	degraded := &models.CheckResult{Status: models.StatusDEGRADED, Message: "High latency"}
 	up := &models.CheckResult{Status: models.StatusUP, Message: "OK"}
 
-	if got := record(t, dbc, m, "na-east", degraded); got != "opened" {
+	if got := record(t, dbc, m, "ca-east", degraded); got != "opened" {
 		t.Fatalf("first DEGRADED: got %q, want opened", got)
 	}
-	if got := record(t, dbc, m, "na-east", degraded); got != "none" {
+	if got := record(t, dbc, m, "ca-east", degraded); got != "none" {
 		t.Fatalf("repeat DEGRADED: got %q, want none", got)
 	}
-	if got := record(t, dbc, m, "na-east", down); got != "escalated" {
+	if got := record(t, dbc, m, "ca-east", down); got != "escalated" {
 		t.Fatalf("DEGRADED->DOWN: got %q, want escalated", got)
 	}
-	if got := record(t, dbc, m, "na-east", degraded); got != "none" {
+	if got := record(t, dbc, m, "ca-east", degraded); got != "none" {
 		t.Fatalf("DOWN->DEGRADED (sticky worst): got %q, want none", got)
 	}
-	if got := record(t, dbc, m, "na-east", up); got != "resolved" {
+	if got := record(t, dbc, m, "ca-east", up); got != "resolved" {
 		t.Fatalf("recovery: got %q, want resolved", got)
 	}
-	if got := record(t, dbc, m, "na-east", up); got != "none" {
+	if got := record(t, dbc, m, "ca-east", up); got != "none" {
 		t.Fatalf("steady UP: got %q, want none", got)
 	}
-	if got := record(t, dbc, m, "na-east", down); got != "opened" {
+	if got := record(t, dbc, m, "ca-east", down); got != "opened" {
 		t.Fatalf("re-open after resolve: got %q, want opened", got)
 	}
 	// Any other writer (fresh instance, handoff duplicate) sees the open
 	// incident in the DB and must not open a second one.
-	if got := record(t, dbc, m, "na-east", down); got != "none" {
+	if got := record(t, dbc, m, "ca-east", down); got != "none" {
 		t.Fatalf("second writer on open incident: got %q, want none", got)
 	}
 
@@ -213,20 +213,20 @@ func TestRegionCheckSingleRegionTransitions(t *testing.T) {
 func TestRegionCheckQuorum(t *testing.T) {
 	dbc := integrationDB(t)
 	m := createTestMonitor(t, dbc, fmt.Sprintf("q-%d", time.Now().UnixNano()),
-		"na-east", "eu-west", "ap-southeast")
-	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+		"ca-east", "eu-west-fr", "eu-west-de")
+	seedHeartbeats(t, dbc, "ca-east", "eu-west-fr", "eu-west-de")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 	up := &models.CheckResult{Status: models.StatusUP, Message: "ok"}
 
-	if got := record(t, dbc, m, "eu-west", down); got != "none" {
+	if got := record(t, dbc, m, "eu-west-fr", down); got != "none" {
 		t.Fatalf("1/3 down: got %q, want none", got)
 	}
 	if n := len(openIncidents(t, dbc, m.ID)); n != 0 {
 		t.Fatalf("open incidents after minority = %d, want 0", n)
 	}
 
-	if got := record(t, dbc, m, "na-east", down); got != "opened" {
+	if got := record(t, dbc, m, "ca-east", down); got != "opened" {
 		t.Fatalf("2/3 down: got %q, want opened", got)
 	}
 	open := openIncidents(t, dbc, m.ID)
@@ -234,16 +234,16 @@ func TestRegionCheckQuorum(t *testing.T) {
 		t.Fatalf("open incidents = %d, want 1", len(open))
 	}
 	msg := open[0].Message
-	if msg == nil || !strings.Contains(*msg, "eu-west") || !strings.Contains(*msg, "na-east") || !strings.Contains(*msg, "2/3") {
+	if msg == nil || !strings.Contains(*msg, "eu-west-fr") || !strings.Contains(*msg, "ca-east") || !strings.Contains(*msg, "2/3") {
 		t.Fatalf("incident message %v should name both failing regions and the 2/3 count", msg)
 	}
 
 	// The healthy third region reporting again must not resolve anything.
-	if got := record(t, dbc, m, "ap-southeast", up); got != "none" {
+	if got := record(t, dbc, m, "eu-west-de", up); got != "none" {
 		t.Fatalf("healthy minority report: got %q, want none", got)
 	}
 
-	if got := record(t, dbc, m, "eu-west", up); got != "resolved" {
+	if got := record(t, dbc, m, "eu-west-fr", up); got != "resolved" {
 		t.Fatalf("recovery to 1/3: got %q, want resolved", got)
 	}
 	if n := len(openIncidents(t, dbc, m.ID)); n != 0 {
@@ -258,32 +258,32 @@ func TestRegionCheckStaleRegionIgnored(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
 	m := createTestMonitor(t, dbc, fmt.Sprintf("st-%d", time.Now().UnixNano()),
-		"na-east", "eu-west")
-	seedHeartbeats(t, dbc, "na-east", "eu-west")
+		"ca-east", "eu-west-fr")
+	seedHeartbeats(t, dbc, "ca-east", "eu-west-fr")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 	up := &models.CheckResult{Status: models.StatusUP, Message: "ok"}
 
-	record(t, dbc, m, "eu-west", down)
-	if got := record(t, dbc, m, "na-east", down); got != "opened" {
+	record(t, dbc, m, "eu-west-fr", down)
+	if got := record(t, dbc, m, "ca-east", down); got != "opened" {
 		t.Fatalf("2/2 down: got %q, want opened", got)
 	}
 
-	// eu-west's pool dies: its DOWN row goes stale (interval is 60s, so 1h is
+	// eu-west-fr's pool dies: its DOWN row goes stale (interval is 60s, so 1h is
 	// far past the 180s freshness window).
 	if _, err := dbc.DB.NewRaw(
 		`UPDATE monitor_region_status SET checked_at = now() - interval '1 hour'
-		  WHERE monitor_id = ? AND region = 'eu-west'`, m.ID,
+		  WHERE monitor_id = ? AND region = 'eu-west-fr'`, m.ID,
 	).Exec(ctx); err != nil {
 		t.Fatalf("backdate region status: %v", err)
 	}
 
-	// With eu-west stale, na-east UP means 0 fresh unhealthy regions -> resolve.
-	if got := record(t, dbc, m, "na-east", up); got != "resolved" {
+	// With eu-west-fr stale, ca-east UP means 0 fresh unhealthy regions -> resolve.
+	if got := record(t, dbc, m, "ca-east", up); got != "resolved" {
 		t.Fatalf("recovery with stale region: got %q, want resolved", got)
 	}
-	// And a lone na-east DOWN afterwards is 1/2 — not a majority.
-	if got := record(t, dbc, m, "na-east", down); got != "none" {
+	// And a lone ca-east DOWN afterwards is 1/2 — not a majority.
+	if got := record(t, dbc, m, "ca-east", down); got != "none" {
 		t.Fatalf("1/2 down with stale region: got %q, want none", got)
 	}
 }
@@ -309,7 +309,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		Interval:  ptrInt(60),
 		Timeout:   30,
 		Enabled:   true,
-		Regions:   []string{"na-east"},
+		Regions:   []string{"ca-east"},
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -369,8 +369,8 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}
-	seedHeartbeats(t, dbc, "na-east")
-	if got := record(t, dbc, monModel, "na-east", &models.CheckResult{
+	seedHeartbeats(t, dbc, "ca-east")
+	if got := record(t, dbc, monModel, "ca-east", &models.CheckResult{
 		Status: models.StatusDOWN, Latency: 42, Message: "Server error", StatusCode: &code,
 	}); got != "opened" {
 		t.Fatalf("open: got %q, want opened", got)
@@ -462,7 +462,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 	}
 
 	// Recovery enqueues an UP row with the recovering check's message.
-	if got := record(t, dbc, monModel, "na-east", &models.CheckResult{
+	if got := record(t, dbc, monModel, "ca-east", &models.CheckResult{
 		Status: models.StatusUP, Latency: 10, Message: "OK",
 	}); got != "resolved" {
 		t.Fatalf("resolve: got %q, want resolved", got)
@@ -502,7 +502,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		Name:      "it-monitor-org",
 		Type:      string(models.MonitorTypeHTTP),
 		Target:    "https://example.com",
-		Regions:   []string{"na-east"},
+		Regions:   []string{"ca-east"},
 		OrgID:     &org.ID,
 		Interval:  ptrInt(60),
 		Timeout:   30,
@@ -531,7 +531,7 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 		UpdatedAt: orgMon.UpdatedAt,
 	}
 
-	if got := record(t, dbc, orgMonModel, "na-east", &models.CheckResult{
+	if got := record(t, dbc, orgMonModel, "ca-east", &models.CheckResult{
 		Status: models.StatusDOWN, Message: "down",
 	}); got != "opened" {
 		t.Fatalf("org open: got %q, want opened", got)
@@ -557,7 +557,7 @@ func TestResultWriterBatchFlush(t *testing.T) {
 	ctx := context.Background()
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rw-%d", time.Now().UnixNano()))
 
-	w := newResultWriter(bundb.NewBunStore(dbc), "eu-west")
+	w := newResultWriter(bundb.NewBunStore(dbc), "eu-west-fr")
 	code := 500
 	for i := 0; i < 5; i++ {
 		w.enqueue(ctx, m.ID, &models.CheckResult{
@@ -584,8 +584,8 @@ func TestResultWriterBatchFlush(t *testing.T) {
 		t.Fatalf("status code = %v, want 500", rows[0].StatusCode)
 	}
 	for _, row := range rows {
-		if row.Region != "eu-west" {
-			t.Fatalf("region = %q, want eu-west", row.Region)
+		if row.Region != "eu-west-fr" {
+			t.Fatalf("region = %q, want eu-west-fr", row.Region)
 		}
 	}
 }
@@ -601,7 +601,7 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	m := createTestMonitor(t, dbc, fmt.Sprintf("rwx-%d", time.Now().UnixNano()))
 
 	hostile := `', 0, NULL, ''); DROP TABLE monitor_results; --`
-	w := newResultWriter(bundb.NewBunStore(dbc), "na-east")
+	w := newResultWriter(bundb.NewBunStore(dbc), "ca-east")
 	defer w.stop()
 	w.flush([]pendingResult{
 		{monitorID: m.ID, result: models.CheckResult{Status: models.StatusUP, Latency: 12, Message: hostile}},
@@ -628,8 +628,8 @@ func TestResultWriterFlushNullsAndDeletedMonitor(t *testing.T) {
 	if rows[0].Message == nil || *rows[0].Message != hostile {
 		t.Fatalf("message = %v, want the raw payload stored verbatim", rows[0].Message)
 	}
-	if rows[0].Region != "na-east" {
-		t.Fatalf("region = %q, want na-east", rows[0].Region)
+	if rows[0].Region != "ca-east" {
+		t.Fatalf("region = %q, want ca-east", rows[0].Region)
 	}
 }
 
@@ -653,35 +653,35 @@ func regionStatusSource(t *testing.T, dbc *bundb.Client, monitorID, region strin
 // region.
 func TestVerificationConfirmsBeforeAlert(t *testing.T) {
 	dbc := integrationDB(t)
-	m := createTestMonitor(t, dbc, fmt.Sprintf("vc-%d", time.Now().UnixNano()), "na-east")
-	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+	m := createTestMonitor(t, dbc, fmt.Sprintf("vc-%d", time.Now().UnixNano()), "ca-east")
+	seedHeartbeats(t, dbc, "ca-east", "eu-west-fr", "eu-west-de")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 
-	// na-east reports DOWN: 1 of 3 active regions — a minority, so no incident,
+	// ca-east reports DOWN: 1 of 3 active regions — a minority, so no incident,
 	// but the other two active regions are queued to confirm.
-	if got := record(t, dbc, m, "na-east", down); got != "none" {
+	if got := record(t, dbc, m, "ca-east", down); got != "none" {
 		t.Fatalf("origin DOWN: got %q, want none (awaiting confirmation)", got)
 	}
 	if n := len(openIncidents(t, dbc, m.ID)); n != 0 {
 		t.Fatalf("open incidents before confirmation = %d, want 0", n)
 	}
 	if pend := pendingVerifications(t, dbc, m.ID); len(pend) != 2 ||
-		pend[0] != "ap-southeast" || pend[1] != "eu-west" {
-		t.Fatalf("pending confirmations = %v, want [ap-southeast eu-west]", pend)
+		pend[0] != "eu-west-de" || pend[1] != "eu-west-fr" {
+		t.Fatalf("pending confirmations = %v, want [eu-west-de eu-west-fr]", pend)
 	}
 
-	// eu-west confirms DOWN: 2 of 3 — majority — opens the incident.
-	if got := recordVerify(t, dbc, m.ID, "eu-west", down); got != "opened" {
+	// eu-west-fr confirms DOWN: 2 of 3 — majority — opens the incident.
+	if got := recordVerify(t, dbc, m.ID, "eu-west-fr", down); got != "opened" {
 		t.Fatalf("confirmation DOWN: got %q, want opened", got)
 	}
 	// The confirming region (not one this monitor normally checks) is recorded
 	// as VERIFICATION so it stays out of the per-region status UI.
-	if src := regionStatusSource(t, dbc, m.ID, "eu-west"); src != "VERIFICATION" {
-		t.Fatalf("eu-west source = %q, want VERIFICATION", src)
+	if src := regionStatusSource(t, dbc, m.ID, "eu-west-fr"); src != "VERIFICATION" {
+		t.Fatalf("eu-west-fr source = %q, want VERIFICATION", src)
 	}
-	if src := regionStatusSource(t, dbc, m.ID, "na-east"); src != "SCHEDULED" {
-		t.Fatalf("na-east source = %q, want SCHEDULED", src)
+	if src := regionStatusSource(t, dbc, m.ID, "ca-east"); src != "SCHEDULED" {
+		t.Fatalf("ca-east source = %q, want SCHEDULED", src)
 	}
 }
 
@@ -689,20 +689,20 @@ func TestVerificationConfirmsBeforeAlert(t *testing.T) {
 // confirms UP — must never open an incident.
 func TestVerificationRegionalBlipNeverAlerts(t *testing.T) {
 	dbc := integrationDB(t)
-	m := createTestMonitor(t, dbc, fmt.Sprintf("blip-%d", time.Now().UnixNano()), "na-east")
-	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+	m := createTestMonitor(t, dbc, fmt.Sprintf("blip-%d", time.Now().UnixNano()), "ca-east")
+	seedHeartbeats(t, dbc, "ca-east", "eu-west-fr", "eu-west-de")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 	up := &models.CheckResult{Status: models.StatusUP, Message: "ok"}
 
-	if got := record(t, dbc, m, "na-east", down); got != "none" {
+	if got := record(t, dbc, m, "ca-east", down); got != "none" {
 		t.Fatalf("origin DOWN: got %q, want none", got)
 	}
-	if got := recordVerify(t, dbc, m.ID, "eu-west", up); got != "none" {
-		t.Fatalf("eu-west UP: got %q, want none", got)
+	if got := recordVerify(t, dbc, m.ID, "eu-west-fr", up); got != "none" {
+		t.Fatalf("eu-west-fr UP: got %q, want none", got)
 	}
-	if got := recordVerify(t, dbc, m.ID, "ap-southeast", up); got != "none" {
-		t.Fatalf("ap-southeast UP: got %q, want none", got)
+	if got := recordVerify(t, dbc, m.ID, "eu-west-de", up); got != "none" {
+		t.Fatalf("eu-west-de UP: got %q, want none", got)
 	}
 	if n := len(openIncidents(t, dbc, m.ID)); n != 0 {
 		t.Fatalf("open incidents after all-confirm-UP = %d, want 0", n)
@@ -715,11 +715,11 @@ func TestVerificationRegionalBlipNeverAlerts(t *testing.T) {
 func TestVerificationExpiryFallbackAlerts(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
-	m := createTestMonitor(t, dbc, fmt.Sprintf("exp-%d", time.Now().UnixNano()), "na-east")
-	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+	m := createTestMonitor(t, dbc, fmt.Sprintf("exp-%d", time.Now().UnixNano()), "ca-east")
+	seedHeartbeats(t, dbc, "ca-east", "eu-west-fr", "eu-west-de")
 	store := bundb.NewBunStore(dbc)
 
-	if got := record(t, dbc, m, "na-east", &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}); got != "none" {
+	if got := record(t, dbc, m, "ca-east", &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}); got != "none" {
 		t.Fatalf("origin DOWN: got %q, want none", got)
 	}
 
@@ -754,18 +754,18 @@ func TestVerificationExpiryFallbackAlerts(t *testing.T) {
 func TestVerificationResolveClearsConfirmations(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
-	m := createTestMonitor(t, dbc, fmt.Sprintf("rc-%d", time.Now().UnixNano()), "na-east")
-	seedHeartbeats(t, dbc, "na-east", "eu-west", "ap-southeast")
+	m := createTestMonitor(t, dbc, fmt.Sprintf("rc-%d", time.Now().UnixNano()), "ca-east")
+	seedHeartbeats(t, dbc, "ca-east", "eu-west-fr", "eu-west-de")
 
 	down := &models.CheckResult{Status: models.StatusDOWN, Message: "refused"}
 
-	record(t, dbc, m, "na-east", down)
-	if got := recordVerify(t, dbc, m.ID, "eu-west", down); got != "opened" {
+	record(t, dbc, m, "ca-east", down)
+	if got := recordVerify(t, dbc, m.ID, "eu-west-fr", down); got != "opened" {
 		t.Fatalf("confirm DOWN: got %q, want opened", got)
 	}
 
 	// Origin recovers → below majority → resolve, and confirmations are purged.
-	if got := record(t, dbc, m, "na-east", &models.CheckResult{Status: models.StatusUP, Message: "ok"}); got != "resolved" {
+	if got := record(t, dbc, m, "ca-east", &models.CheckResult{Status: models.StatusUP, Message: "ok"}); got != "resolved" {
 		t.Fatalf("recovery: got %q, want resolved", got)
 	}
 	var verificationRows, requests int
@@ -783,7 +783,7 @@ func TestFollowPlanIntervalResolvesAtFetch(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
 	owner := fmt.Sprintf("it-user-fp-%d", time.Now().UnixNano())
-	region := "na-east"
+	region := "ca-east"
 
 	m := &bundb.Monitor{
 		ID:        uuid.NewString(),

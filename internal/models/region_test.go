@@ -27,7 +27,9 @@ func TestValidRegion(t *testing.T) {
 	if !ValidRegion(DefaultRegion) {
 		t.Errorf("ValidRegion(%q) = false, want true", DefaultRegion)
 	}
-	for _, bad := range []string{"", "us-west", "US-EAST", " na-east"} {
+	// na-east is deliberately in the bad list: it left the registry in the
+	// 2026-07 rename and must never validate again.
+	for _, bad := range []string{"", "na-east", "CA-EAST", " ca-east"} {
 		if ValidRegion(bad) {
 			t.Errorf("ValidRegion(%q) = true, want false", bad)
 		}
@@ -35,9 +37,9 @@ func TestValidRegion(t *testing.T) {
 }
 
 func TestRegionByID(t *testing.T) {
-	r, ok := RegionByID("eu-west")
-	if !ok || r.Name != "EU West" {
-		t.Errorf("RegionByID(eu-west) = %+v, %v", r, ok)
+	r, ok := RegionByID("eu-west-fr")
+	if !ok || r.Name != "Europe (France)" {
+		t.Errorf("RegionByID(eu-west-fr) = %+v, %v", r, ok)
 	}
 	if _, ok := RegionByID("nope"); ok {
 		t.Error("RegionByID(nope) unexpectedly found")
@@ -51,9 +53,9 @@ func TestNormalizeRegions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"single", []string{"na-east"}, []string{"na-east"}, false},
-		{"dedupes preserving order", []string{"eu-west", "na-east", "eu-west"}, []string{"eu-west", "na-east"}, false},
-		{"unknown region", []string{"na-east", "mars-north"}, nil, true},
+		{"single", []string{"ca-east"}, []string{"ca-east"}, false},
+		{"dedupes preserving order", []string{"us-west", "ca-east", "us-west"}, []string{"us-west", "ca-east"}, false},
+		{"unknown region", []string{"ca-east", "mars-north"}, nil, true},
 		{"empty list", []string{}, nil, true},
 		{"empty string entry", []string{""}, nil, true},
 	}
