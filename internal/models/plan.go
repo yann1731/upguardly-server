@@ -22,6 +22,15 @@ type PlanLimits struct {
 	// the effective plan changes: once a downgrade lands (after the paid
 	// period ends), region lists over the cap are trimmed.
 	MaxRegions int
+	// MaxLoginSeats caps invited (non-owner) organization members; the owner
+	// is free. PENDING non-expired invitations count against the cap, so a
+	// seat is consumed the moment an invitation goes out. Orgs are an
+	// ENTERPRISE feature, so lower tiers carry 0.
+	MaxLoginSeats int
+	// MaxAlertRecipients caps an organization's notify-only alert recipients
+	// (the "alerting seats"): bare EMAIL/SMS contacts that receive alerts for
+	// every org monitor. The owner's own channels don't count.
+	MaxAlertRecipients int
 }
 
 // Unlimited is the sentinel used for plans with no cap on a given resource.
@@ -70,7 +79,7 @@ func LimitsForPlan(plan string) PlanLimits {
 	case "PRO":
 		return PlanLimits{MaxMonitors: 20, MaxGlobalChannels: 10, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: 3}
 	case "ENTERPRISE":
-		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: Unlimited}
+		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: Unlimited, MaxLoginSeats: 3, MaxAlertRecipients: 3}
 	default: // FREE and anything unrecognised
 		// Integrations are the only alert destinations (per-monitor alerts no
 		// longer exist), so FREE gets one per allowed channel type — matching

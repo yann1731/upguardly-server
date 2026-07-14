@@ -93,6 +93,67 @@ func TestCreateOrg(t *testing.T) {
 	})
 }
 
+func TestCreateInvitationSeats(t *testing.T) {
+	// Login seats: the owner is free; each non-owner member and each pending
+	// non-expired invitation holds one of the plan's 3 seats.
+	t.Run("invite under the cap succeeds (201)", func(t *testing.T) {
+		store := enterpriseOrgStore()
+		store.memberCount = 1
+		store.pendingInvCount = 1
+		router, h := newOrgRouter(store, nil)
+		router.POST("/v1/organizations/:id/invitations", h.CreateInvitation)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/invitations",
+			`{"email":"new@example.com","role":"MEMBER"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+	})
+
+	t.Run("members plus pending invitations at the cap returns 402", func(t *testing.T) {
+		store := enterpriseOrgStore()
+		store.memberCount = 2
+		store.pendingInvCount = 1
+		router, h := newOrgRouter(store, nil)
+		router.POST("/v1/organizations/:id/invitations", h.CreateInvitation)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/invitations",
+			`{"email":"new@example.com","role":"MEMBER"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("lapsed plan blocks any invite (402)", func(t *testing.T) {
+		// No subscription row → FREE → MaxLoginSeats 0.
+		store := &mockStore{orgResult: &models.Organization{ID: testOrgID, Name: "Acme", OwnerID: testUserID}}
+		router, h := newOrgRouter(store, nil)
+		router.POST("/v1/organizations/:id/invitations", h.CreateInvitation)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/invitations",
+			`{"email":"new@example.com","role":"MEMBER"}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+}
+
+func TestGetOrgSeats(t *testing.T) {
+	t.Run("returns seat usage alongside the org", func(t *testing.T) {
+		store := enterpriseOrgStore()
+		store.memberCount = 1
+		store.pendingInvCount = 1
+		store.recipientCount = 2
+		router, h := newOrgRouter(store, nil)
+		router.GET("/v1/organizations/:id", h.GetOrg)
+
+		w := doRequest(router, "GET", "/v1/organizations/test-org-id", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `"loginSeatsUsed":2`)
+		assert.Contains(t, w.Body.String(), `"maxLoginSeats":3`)
+		assert.Contains(t, w.Body.String(), `"alertRecipientsUsed":2`)
+		assert.Contains(t, w.Body.String(), `"maxAlertRecipients":3`)
+	})
+}
+
 func TestAcceptInvitation(t *testing.T) {
 	pendingInvite := func() *models.Invitation {
 		return &models.Invitation{
@@ -131,6 +192,37 @@ func TestAcceptInvitation(t *testing.T) {
 		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")
 
 		assert.Equal(t, http.StatusConflict, w.Code)
+	})
+
+	t.Run("seat limit from store returns 409", func(t *testing.T) {
+		// The transactional re-check inside AcceptInvitation lost the race:
+		// the org filled up between the invite and the accept.
+		store := &mockStore{
+			inviteResult:    pendingInvite(),
+			acceptInviteErr: models.ErrSeatLimit,
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/invitations/:token/accept", h.AcceptInvitation)
+
+		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")
+
+		assert.Equal(t, http.StatusConflict, w.Code)
+	})
+
+	t.Run("passes the org plan's seat cap to the store", func(t *testing.T) {
+		store := &mockStore{
+			inviteResult:     pendingInvite(),
+			orgResult:        &models.Organization{ID: "org-1", Name: "Acme", OwnerID: "owner-1"},
+			subResult:        aSubscription("ENTERPRISE"),
+			membershipResult: aMembership(),
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/invitations/:token/accept", h.AcceptInvitation)
+
+		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 3, store.lastAcceptMaxSeats)
 	})
 }
 

@@ -40,6 +40,29 @@ func (h *Handlers) CreateInvitation(c *gin.Context) {
 		}
 	}
 
+	// Login seats: the owner is free; every other member and every pending
+	// non-expired invitation holds a seat. This is the user-facing check —
+	// AcceptInvitation re-checks transactionally in case of races.
+	limits := models.LimitsForPlan(h.planForOrg(c.Request.Context(), orgId))
+	if limits.MaxLoginSeats != models.Unlimited {
+		members, err := h.store.CountNonOwnerMembers(c.Request.Context(), orgId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check seat quota"})
+			return
+		}
+		pending, err := h.store.CountPendingInvitations(c.Request.Context(), orgId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check seat quota"})
+			return
+		}
+		if members+pending >= limits.MaxLoginSeats {
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error": fmt.Sprintf("Login seat limit reached for your plan (%d). Revoke a pending invitation or remove a member to free a seat.", limits.MaxLoginSeats),
+			})
+			return
+		}
+	}
+
 	rawToken, err := generateToken()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate invitation token"})
@@ -157,8 +180,13 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 		return
 	}
 
-	member, err := h.store.AcceptInvitation(c.Request.Context(), tokenHash, userId)
+	maxSeats := models.LimitsForPlan(h.planForOrg(c.Request.Context(), inv.OrgID)).MaxLoginSeats
+	member, err := h.store.AcceptInvitation(c.Request.Context(), tokenHash, userId, maxSeats)
 	if err != nil {
+		if errors.Is(err, models.ErrSeatLimit) {
+			c.JSON(http.StatusConflict, gin.H{"error": "This organization has no available seats"})
+			return
+		}
 		if errors.Is(err, models.ErrConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "You already belong to an organization"})
 			return

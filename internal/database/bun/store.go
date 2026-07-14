@@ -854,6 +854,75 @@ func (s *BunStore) RemoveMember(ctx context.Context, orgId, userId string) error
 	return mapError(err)
 }
 
+// CountNonOwnerMembers counts the members holding a login seat: everyone but
+// the OWNER, who is free.
+func (s *BunStore) CountNonOwnerMembers(ctx context.Context, orgId string) (int, error) {
+	count, err := s.client.DB.NewSelect().
+		Model((*OrganizationMember)(nil)).
+		Where("organization_id = ? AND role <> 'OWNER'", orgId).
+		Count(ctx)
+	return count, mapError(err)
+}
+
+// ── Org alert recipients ─────────────────────────────────────────────────────
+
+func (s *BunStore) CreateOrgAlertRecipient(ctx context.Context, orgId, channel, target string) (*models.OrgAlertRecipient, error) {
+	r := &OrgAlertRecipient{
+		ID:             uuid.NewString(),
+		OrganizationID: orgId,
+		Channel:        channel,
+		Target:         target,
+	}
+	if err := s.client.DB.NewInsert().Model(r).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	model := r.toModel()
+	return &model, nil
+}
+
+func (s *BunStore) ListOrgAlertRecipients(ctx context.Context, orgId string) ([]models.OrgAlertRecipient, error) {
+	var recipients []OrgAlertRecipient
+	err := s.client.DB.NewSelect().
+		Model(&recipients).
+		Where("organization_id = ?", orgId).
+		Order("created_at ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]models.OrgAlertRecipient, len(recipients))
+	for i, r := range recipients {
+		out[i] = r.toModel()
+	}
+	return out, nil
+}
+
+func (s *BunStore) CountOrgAlertRecipients(ctx context.Context, orgId string) (int, error) {
+	count, err := s.client.DB.NewSelect().
+		Model((*OrgAlertRecipient)(nil)).
+		Where("organization_id = ?", orgId).
+		Count(ctx)
+	return count, mapError(err)
+}
+
+func (s *BunStore) DeleteOrgAlertRecipient(ctx context.Context, orgId, id string) error {
+	res, err := s.client.DB.NewDelete().
+		Model((*OrgAlertRecipient)(nil)).
+		Where("id = ? AND organization_id = ?", id, orgId).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return models.ErrNotFound
+	}
+	return nil
+}
+
 // ── Invitations ──────────────────────────────────────────────────────────────
 
 func (s *BunStore) CreateInvitation(ctx context.Context, orgId, email, invitedBy string, role models.OrgRole, token string, expiresAt time.Time) (*models.Invitation, error) {
@@ -916,7 +985,17 @@ func (s *BunStore) ListInvitations(ctx context.Context, orgId string) ([]models.
 	return out, nil
 }
 
-func (s *BunStore) AcceptInvitation(ctx context.Context, token, userId string) (*models.OrganizationMember, error) {
+// CountPendingInvitations counts PENDING, non-expired invitations — each one
+// holds a login seat until accepted, revoked, or expired.
+func (s *BunStore) CountPendingInvitations(ctx context.Context, orgId string) (int, error) {
+	count, err := s.client.DB.NewSelect().
+		Model((*Invitation)(nil)).
+		Where("organization_id = ? AND status = 'PENDING' AND expires_at > now()", orgId).
+		Count(ctx)
+	return count, mapError(err)
+}
+
+func (s *BunStore) AcceptInvitation(ctx context.Context, token, userId string, maxLoginSeats int) (*models.OrganizationMember, error) {
 	var member OrganizationMember
 
 	err := s.client.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -927,6 +1006,36 @@ func (s *BunStore) AcceptInvitation(ctx context.Context, token, userId string) (
 			Scan(ctx)
 		if err != nil {
 			return err
+		}
+
+		// Authoritative login-seat check. Lock the org row so concurrent
+		// accepts serialize, then count seats in use, excluding this
+		// invitation — it already holds the seat it is converting.
+		if maxLoginSeats != models.Unlimited {
+			var orgID string
+			if err := tx.NewSelect().
+				Table("organizations").
+				Column("id").
+				Where("id = ?", inv.OrganizationID).
+				For("UPDATE").
+				Scan(ctx, &orgID); err != nil {
+				return err
+			}
+
+			var seatsUsed int
+			if err := tx.NewRaw(`
+				SELECT (SELECT count(*) FROM organization_members
+				         WHERE organization_id = ? AND role <> 'OWNER')
+				     + (SELECT count(*) FROM invitations
+				         WHERE organization_id = ? AND status = 'PENDING'
+				           AND expires_at > now() AND id <> ?)`,
+				inv.OrganizationID, inv.OrganizationID, inv.ID,
+			).Scan(ctx, &seatsUsed); err != nil {
+				return err
+			}
+			if seatsUsed >= maxLoginSeats {
+				return models.ErrSeatLimit
+			}
 		}
 
 		member = OrganizationMember{

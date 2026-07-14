@@ -26,6 +26,19 @@ type OrganizationMember struct {
 	CreatedAt      time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 }
 
+// OrgAlertRecipient is a notify-only alerting seat: a bare EMAIL/SMS contact
+// on an organization, alerted for every org monitor (see migration
+// 20260714120000_org_seats).
+type OrgAlertRecipient struct {
+	bun.BaseModel `bun:"table:org_alert_recipients,alias:oar"`
+
+	ID             string    `bun:"id,pk"`
+	OrganizationID string    `bun:"organization_id,notnull"`
+	Channel        string    `bun:"channel,notnull"`
+	Target         string    `bun:"target,notnull"`
+	CreatedAt      time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+}
+
 type Invitation struct {
 	bun.BaseModel `bun:"table:invitations,alias:i"`
 
@@ -171,6 +184,7 @@ type AlertOutbox struct {
 	ID                    string    `bun:"id,pk"`
 	AlertID               *string   `bun:"alert_id"`
 	NotificationChannelID *string   `bun:"notification_channel_id"`
+	OrgAlertRecipientID   *string   `bun:"org_alert_recipient_id"`
 	MonitorID             string    `bun:"monitor_id,notnull"`
 	Channel               string    `bun:"channel,notnull"`
 	Target                string    `bun:"target,notnull"`

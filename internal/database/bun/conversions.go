@@ -51,6 +51,16 @@ func (om *OrganizationMember) toModel() models.OrganizationMember {
 	}
 }
 
+func (r *OrgAlertRecipient) toModel() models.OrgAlertRecipient {
+	return models.OrgAlertRecipient{
+		ID:        r.ID,
+		OrgID:     r.OrganizationID,
+		Channel:   models.AlertChannel(r.Channel),
+		Target:    r.Target,
+		CreatedAt: r.CreatedAt,
+	}
+}
+
 func (i *Invitation) toModel() models.Invitation {
 	return models.Invitation{
 		ID:        i.ID,

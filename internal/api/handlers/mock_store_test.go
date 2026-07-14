@@ -61,6 +61,19 @@ type mockStore struct {
 	reconcileCount   int
 	reconcileErr     error
 
+	// seat / alert recipient return values
+	memberCount        int
+	memberCountErr     error
+	pendingInvCount    int
+	pendingInvCountErr error
+	recipientResult    *models.OrgAlertRecipient
+	recipientErr       error
+	recipientsResult   []models.OrgAlertRecipient
+	recipientsErr      error
+	recipientCount     int
+	recipientCountErr  error
+	deleteRecipientErr error
+
 	// region status return values
 	regionStatusResult []models.MonitorRegionStatus
 	regionStatusErr    error
@@ -77,6 +90,9 @@ type mockStore struct {
 	lastChannelCreateTarget  string
 	lastChannelUpdate        *models.UpdateNotificationChannelRequest
 	lastReconcile            *reconcileCall
+	lastRecipientChannel     string
+	lastRecipientTarget      string
+	lastAcceptMaxSeats       int
 }
 
 // reconcileCall captures one ReconcileMonitorsToPlan invocation.
@@ -193,11 +209,37 @@ func (m *mockStore) UpdateMemberRole(_ context.Context, _, _ string, _ models.Or
 	return nil, nil
 }
 func (m *mockStore) RemoveMember(_ context.Context, _, _ string) error { return nil }
+func (m *mockStore) CountNonOwnerMembers(_ context.Context, _ string) (int, error) {
+	return m.memberCount, m.memberCountErr
+}
+
+// ── Org alert recipient stubs ─────────────────────────────────────────────────
+
+func (m *mockStore) CreateOrgAlertRecipient(_ context.Context, _, channel, target string) (*models.OrgAlertRecipient, error) {
+	m.lastRecipientChannel = channel
+	m.lastRecipientTarget = target
+	return m.recipientResult, m.recipientErr
+}
+func (m *mockStore) ListOrgAlertRecipients(_ context.Context, _ string) ([]models.OrgAlertRecipient, error) {
+	return m.recipientsResult, m.recipientsErr
+}
+func (m *mockStore) CountOrgAlertRecipients(_ context.Context, _ string) (int, error) {
+	return m.recipientCount, m.recipientCountErr
+}
+func (m *mockStore) DeleteOrgAlertRecipient(_ context.Context, _, _ string) error {
+	return m.deleteRecipientErr
+}
 
 // ── Invitation stubs ──────────────────────────────────────────────────────────
 
-func (m *mockStore) CreateInvitation(_ context.Context, _, _, _ string, _ models.OrgRole, _ string, _ time.Time) (*models.Invitation, error) {
-	return nil, nil
+func (m *mockStore) CreateInvitation(_ context.Context, orgId, email, _ string, role models.OrgRole, _ string, expiresAt time.Time) (*models.Invitation, error) {
+	if m.inviteErr != nil {
+		return nil, m.inviteErr
+	}
+	if m.inviteResult != nil {
+		return m.inviteResult, nil
+	}
+	return &models.Invitation{ID: "inv-new", OrgID: orgId, Email: email, Role: role, Status: "PENDING", ExpiresAt: expiresAt}, nil
 }
 func (m *mockStore) GetInvitationByToken(_ context.Context, _ string) (*models.Invitation, error) {
 	if m.inviteResult == nil && m.inviteErr == nil {
@@ -211,7 +253,11 @@ func (m *mockStore) GetInvitationByID(_ context.Context, _ string) (*models.Invi
 func (m *mockStore) ListInvitations(_ context.Context, _ string) ([]models.Invitation, error) {
 	return nil, nil
 }
-func (m *mockStore) AcceptInvitation(_ context.Context, _, _ string) (*models.OrganizationMember, error) {
+func (m *mockStore) CountPendingInvitations(_ context.Context, _ string) (int, error) {
+	return m.pendingInvCount, m.pendingInvCountErr
+}
+func (m *mockStore) AcceptInvitation(_ context.Context, _, _ string, maxLoginSeats int) (*models.OrganizationMember, error) {
+	m.lastAcceptMaxSeats = maxLoginSeats
 	return m.membershipResult, m.acceptInviteErr
 }
 func (m *mockStore) RevokeInvitation(_ context.Context, _ string) error { return nil }

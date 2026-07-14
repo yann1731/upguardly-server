@@ -14,6 +14,7 @@ package bun
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -57,6 +58,61 @@ func TestCreatePathsPopulateGeneratedColumns(t *testing.T) {
 
 	// The Stripe webhook path: a NULL id failed here before conflict resolution
 	// even ran, so subscription writes never landed.
+	t.Run("org alert recipient", func(t *testing.T) {
+		o, err := s.CreateOrganization(ctx, "rcpt-"+uuid.NewString(), "org-"+uuid.NewString()[:8])
+		if err != nil {
+			t.Fatalf("CreateOrganization: %v", err)
+		}
+		r, err := s.CreateOrgAlertRecipient(ctx, o.ID, "EMAIL", "oncall@example.com")
+		if err != nil {
+			t.Fatalf("CreateOrgAlertRecipient: %v", err)
+		}
+		if r.ID == "" {
+			t.Error("org alert recipient id is empty")
+		}
+
+		// The unique (org, channel, target) index must surface as ErrConflict.
+		if _, err := s.CreateOrgAlertRecipient(ctx, o.ID, "EMAIL", "oncall@example.com"); err != models.ErrConflict {
+			t.Errorf("duplicate recipient: got %v, want ErrConflict", err)
+		}
+	})
+
+	// Login seats: the transactional re-check in AcceptInvitation must let all
+	// invited members convert their own pending invitations (each accept
+	// excludes itself from the count) but reject an accept once the org is
+	// full — the race the handler pre-check can't close.
+	t.Run("accept invitation seat limit", func(t *testing.T) {
+		owner := "seat-owner-" + uuid.NewString()
+		o, err := s.CreateOrganization(ctx, owner, "org-"+uuid.NewString()[:8])
+		if err != nil {
+			t.Fatalf("CreateOrganization: %v", err)
+		}
+
+		invite := func(n int) string {
+			token := "tok-" + uuid.NewString()
+			_, err := s.CreateInvitation(ctx, o.ID, uuid.NewString()[:8]+"@example.com", owner,
+				models.OrgRoleMember, token, time.Now().Add(24*time.Hour))
+			if err != nil {
+				t.Fatalf("CreateInvitation %d: %v", n, err)
+			}
+			return token
+		}
+
+		// Three invitations fill the plan's three seats; each accept must
+		// still succeed because an accept converts its own seat.
+		for i, token := range []string{invite(1), invite(2), invite(3)} {
+			if _, err := s.AcceptInvitation(ctx, token, "seat-user-"+uuid.NewString(), 3); err != nil {
+				t.Fatalf("AcceptInvitation %d at cap-with-self: %v", i+1, err)
+			}
+		}
+
+		// A fourth invitation (simulating one that raced past the handler
+		// pre-check) must be rejected at accept time.
+		if _, err := s.AcceptInvitation(ctx, invite(4), "seat-user-"+uuid.NewString(), 3); err != models.ErrSeatLimit {
+			t.Errorf("AcceptInvitation over cap: got %v, want ErrSeatLimit", err)
+		}
+	})
+
 	t.Run("subscription upsert", func(t *testing.T) {
 		sub, err := s.UpsertSubscription(ctx, models.UpsertSubscriptionParams{
 			UserID: user,

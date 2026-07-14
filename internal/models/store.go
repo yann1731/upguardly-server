@@ -12,6 +12,11 @@ var ErrNotFound = errors.New("not found")
 // duplicate organization name or a user joining a second organization.
 var ErrConflict = errors.New("conflict")
 
+// ErrSeatLimit is returned when accepting an invitation would push an
+// organization past its plan's login-seat cap (checked transactionally in
+// AcceptInvitation; CreateInvitation pre-checks the same rule in the handler).
+var ErrSeatLimit = errors.New("seat limit reached")
+
 type Store interface {
 	// Monitors. interval is nil for a follow-plan monitor (resolved to the
 	// plan minimum at read time), or an explicit override in seconds.
@@ -52,15 +57,31 @@ type Store interface {
 	// Members
 	GetMembership(ctx context.Context, orgId, userId string) (*OrganizationMember, error)
 	ListMembers(ctx context.Context, orgId string) ([]OrganizationMember, error)
+	// CountNonOwnerMembers counts members holding a login seat (everyone but
+	// the OWNER, who is free).
+	CountNonOwnerMembers(ctx context.Context, orgId string) (int, error)
 	UpdateMemberRole(ctx context.Context, orgId, userId string, role OrgRole) (*OrganizationMember, error)
 	RemoveMember(ctx context.Context, orgId, userId string) error
+
+	// Org alert recipients (notify-only alerting seats)
+	CreateOrgAlertRecipient(ctx context.Context, orgId, channel, target string) (*OrgAlertRecipient, error)
+	ListOrgAlertRecipients(ctx context.Context, orgId string) ([]OrgAlertRecipient, error)
+	CountOrgAlertRecipients(ctx context.Context, orgId string) (int, error)
+	DeleteOrgAlertRecipient(ctx context.Context, orgId, id string) error
 
 	// Invitations
 	CreateInvitation(ctx context.Context, orgId, email, invitedBy string, role OrgRole, token string, expiresAt time.Time) (*Invitation, error)
 	GetInvitationByToken(ctx context.Context, token string) (*Invitation, error)
 	GetInvitationByID(ctx context.Context, id string) (*Invitation, error)
 	ListInvitations(ctx context.Context, orgId string) ([]Invitation, error)
-	AcceptInvitation(ctx context.Context, token, userId string) (*OrganizationMember, error)
+	// CountPendingInvitations counts PENDING, non-expired invitations — each
+	// one holds a login seat until accepted, revoked, or expired.
+	CountPendingInvitations(ctx context.Context, orgId string) (int, error)
+	// AcceptInvitation converts a pending invitation into a membership. When
+	// maxLoginSeats != Unlimited it re-checks the seat cap inside the
+	// transaction (excluding the invitation being accepted, which already
+	// holds the seat it is converting) and returns ErrSeatLimit if exceeded.
+	AcceptInvitation(ctx context.Context, token, userId string, maxLoginSeats int) (*OrganizationMember, error)
 	RevokeInvitation(ctx context.Context, id string) error
 
 	// Subscriptions (keyed on the user — the billing subject)

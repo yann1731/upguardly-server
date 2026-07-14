@@ -81,7 +81,34 @@ func (h *Handlers) GetOrg(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, org)
+	// Seat usage rides along so every member (including VIEWERs, who can't
+	// list invitations) can render the counters.
+	limits := models.LimitsForPlan(h.planForOrg(c.Request.Context(), orgId))
+	members, err := h.store.CountNonOwnerMembers(c.Request.Context(), orgId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load seat usage"})
+		return
+	}
+	pending, err := h.store.CountPendingInvitations(c.Request.Context(), orgId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load seat usage"})
+		return
+	}
+	recipients, err := h.store.CountOrgAlertRecipients(c.Request.Context(), orgId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load seat usage"})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.OrgWithSeats{
+		Organization: *org,
+		Seats: models.OrgSeats{
+			LoginSeatsUsed:      members + pending,
+			MaxLoginSeats:       limits.MaxLoginSeats,
+			AlertRecipientsUsed: recipients,
+			MaxAlertRecipients:  limits.MaxAlertRecipients,
+		},
+	})
 }
 
 func (h *Handlers) UpdateOrg(c *gin.Context) {

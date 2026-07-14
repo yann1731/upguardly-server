@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
 	"regexp"
 
@@ -73,6 +74,28 @@ func validateAlertTarget(channel models.AlertChannel, target string) error {
 	}
 
 	return nil
+}
+
+// validateRecipientTarget checks an org alert recipient's destination. Unlike
+// notification channels, recipient emails are free-form (not pinned to any
+// account), so the address itself must be validated.
+func validateRecipientTarget(channel models.AlertChannel, target string) error {
+	switch channel {
+	case models.AlertChannelEMAIL:
+		addr, err := mail.ParseAddress(target)
+		if err != nil || addr.Address != target {
+			return fmt.Errorf("invalid email target: must be a plain email address (e.g. oncall@example.com)")
+		}
+		return nil
+
+	case models.AlertChannelSMS:
+		if !e164Regexp.MatchString(target) {
+			return fmt.Errorf("invalid SMS target: must be an E.164 phone number (e.g. +12125551234)")
+		}
+		return nil
+	}
+
+	return fmt.Errorf("alert recipients only support the EMAIL and SMS channels")
 }
 
 func isNotFound(err error) bool {

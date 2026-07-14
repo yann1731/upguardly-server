@@ -226,6 +226,11 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 					org.POST("/invitations", middleware.RequireOrgRole(store, models.OrgRoleAdmin), middleware.StrictRateLimit(), h.CreateInvitation)
 					org.GET("/invitations", middleware.RequireOrgRole(store, models.OrgRoleAdmin), h.ListInvitations)
 					org.DELETE("/invitations/:invId", middleware.RequireOrgRole(store, models.OrgRoleAdmin), h.RevokeInvitation)
+
+					// Alert recipients (notify-only alerting seats)
+					org.GET("/alert-recipients", middleware.RequireOrgRole(store, models.OrgRoleViewer), h.ListOrgAlertRecipients)
+					org.POST("/alert-recipients", middleware.RequireOrgRole(store, models.OrgRoleAdmin), middleware.StrictRateLimit(), h.CreateOrgAlertRecipient)
+					org.DELETE("/alert-recipients/:recipientId", middleware.RequireOrgRole(store, models.OrgRoleAdmin), middleware.StrictRateLimit(), h.DeleteOrgAlertRecipient)
 				}
 			}
 		}

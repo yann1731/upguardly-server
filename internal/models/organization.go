@@ -40,6 +40,33 @@ type OrganizationMember struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// OrgAlertRecipient is a notify-only alerting seat: a bare EMAIL or SMS
+// contact attached to an organization that receives alerts for every org
+// monitor. No user account is involved; the org owner keeps receiving through
+// their own notification channels without consuming a seat.
+type OrgAlertRecipient struct {
+	ID        string       `json:"id"`
+	OrgID     string       `json:"orgId"`
+	Channel   AlertChannel `json:"channel"`
+	Target    string       `json:"target"`
+	CreatedAt time.Time    `json:"createdAt"`
+}
+
+// OrgSeats reports seat usage against the org's plan limits so the client can
+// render counters. Max values use the Unlimited (-1) sentinel.
+type OrgSeats struct {
+	LoginSeatsUsed      int `json:"loginSeatsUsed"`
+	MaxLoginSeats       int `json:"maxLoginSeats"`
+	AlertRecipientsUsed int `json:"alertRecipientsUsed"`
+	MaxAlertRecipients  int `json:"maxAlertRecipients"`
+}
+
+// OrgWithSeats is the GET /organizations/:id response shape.
+type OrgWithSeats struct {
+	Organization
+	Seats OrgSeats `json:"seats"`
+}
+
 type Invitation struct {
 	ID        string    `json:"id"`
 	OrgID     string    `json:"orgId"`
@@ -84,6 +111,11 @@ type UpdateOrgRequest struct {
 type InviteMemberRequest struct {
 	Email string  `json:"email" binding:"required,email"`
 	Role  OrgRole `json:"role" binding:"required,oneof=ADMIN MEMBER VIEWER"`
+}
+
+type CreateOrgAlertRecipientRequest struct {
+	Channel AlertChannel `json:"channel" binding:"required,oneof=EMAIL SMS"`
+	Target  string       `json:"target" binding:"required,max=254"`
 }
 
 type UpdateMemberRoleRequest struct {

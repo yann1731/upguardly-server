@@ -552,6 +552,179 @@ func TestRegionCheckOutboxAtomic(t *testing.T) {
 	}
 }
 
+// Org alert recipients (notify-only alerting seats, migration 20260714120000):
+// an incident transition on an org monitor fans out to the org's recipients in
+// addition to the owner's channels, skipping a recipient that duplicates an
+// effectively-enabled owner channel. Solo monitors never hit recipients, and a
+// recipient-sourced row finalizes as a plain delete (no history) so the
+// pre-change dispatcher remains compatible.
+func TestOrgRecipientFanOut(t *testing.T) {
+	dbc := integrationDB(t)
+	ctx := context.Background()
+	store := bundb.NewBunStore(dbc)
+
+	owner := fmt.Sprintf("it-user-rcpt-%d", time.Now().UnixNano())
+	org := &bundb.Organization{
+		ID:        uuid.NewString(),
+		Name:      fmt.Sprintf("it-org-rcpt-%d", time.Now().UnixNano()),
+		OwnerID:   owner,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(org).Exec(ctx); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = dbc.DB.NewDelete().Table("organizations").Where("id = ?", org.ID).Exec(ctx)
+	})
+
+	// Owner channel sharing a destination with the EMAIL recipient below: the
+	// fan-out must dedupe it.
+	ownerCh := &bundb.NotificationChannel{
+		ID:        uuid.NewString(),
+		UserID:    owner,
+		Channel:   string(models.AlertChannelEMAIL),
+		Target:    "shared@example.com",
+		Enabled:   true,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := dbc.DB.NewInsert().Model(ownerCh).Exec(ctx); err != nil {
+		t.Fatalf("create owner channel: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = dbc.DB.NewDelete().Table("notification_channels").Where("id = ?", ownerCh.ID).Exec(ctx)
+	})
+
+	dupEmail, err := store.CreateOrgAlertRecipient(ctx, org.ID, string(models.AlertChannelEMAIL), "shared@example.com")
+	if err != nil {
+		t.Fatalf("create email recipient: %v", err)
+	}
+	sms, err := store.CreateOrgAlertRecipient(ctx, org.ID, string(models.AlertChannelSMS), "+12125551234")
+	if err != nil {
+		t.Fatalf("create sms recipient: %v", err)
+	}
+
+	newMonitor := func(name string, orgID *string) (*bundb.Monitor, *models.Monitor) {
+		m := &bundb.Monitor{
+			ID:        uuid.NewString(),
+			UserID:    owner,
+			OrgID:     orgID,
+			Name:      name,
+			Type:      string(models.MonitorTypeHTTP),
+			Target:    "https://example.com",
+			Interval:  ptrInt(60),
+			Timeout:   30,
+			Enabled:   true,
+			Regions:   []string{"ca-east"},
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if _, err := dbc.DB.NewInsert().Model(m).Exec(ctx); err != nil {
+			t.Fatalf("create monitor %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			_, _ = dbc.DB.NewDelete().Table("monitors").Where("id = ?", m.ID).Exec(ctx)
+		})
+		return m, &models.Monitor{
+			ID:        m.ID,
+			OrgID:     m.OrgID,
+			Name:      m.Name,
+			Type:      models.MonitorType(m.Type),
+			Target:    m.Target,
+			Interval:  models.EffectiveInterval(m.Interval, "FREE", m.Timeout),
+			Timeout:   m.Timeout,
+			Enabled:   m.Enabled,
+			Regions:   m.Regions,
+			CreatedAt: m.CreatedAt,
+			UpdatedAt: m.UpdatedAt,
+		}
+	}
+
+	orgMon, orgMonModel := newMonitor("it-monitor-rcpt-org", &org.ID)
+	soloMon, soloMonModel := newMonitor("it-monitor-rcpt-solo", nil)
+
+	seedHeartbeats(t, dbc, "ca-east")
+
+	if got := record(t, dbc, orgMonModel, "ca-east", &models.CheckResult{
+		Status: models.StatusDOWN, Message: "down",
+	}); got != "opened" {
+		t.Fatalf("org open: got %q, want opened", got)
+	}
+
+	var rows []bundb.AlertOutbox
+	if err := dbc.DB.NewSelect().
+		Model(&rows).
+		Where("monitor_id = ?", orgMon.ID).
+		Scan(ctx); err != nil {
+		t.Fatalf("list org outbox: %v", err)
+	}
+	// Expect exactly two rows: the owner's EMAIL channel and the SMS
+	// recipient. The EMAIL recipient duplicates the owner channel's
+	// destination and must be deduped.
+	if len(rows) != 2 {
+		t.Fatalf("org outbox rows = %d, want 2 (owner channel + sms recipient): %+v", len(rows), rows)
+	}
+	var smsRow *bundb.AlertOutbox
+	for i := range rows {
+		switch {
+		case rows[i].NotificationChannelID != nil && *rows[i].NotificationChannelID == ownerCh.ID:
+			// owner channel row, expected
+		case rows[i].OrgAlertRecipientID != nil && *rows[i].OrgAlertRecipientID == sms.ID:
+			smsRow = &rows[i]
+		case rows[i].OrgAlertRecipientID != nil && *rows[i].OrgAlertRecipientID == dupEmail.ID:
+			t.Fatalf("duplicate EMAIL recipient was not deduped against the owner channel")
+		default:
+			t.Fatalf("unexpected outbox row: %+v", rows[i])
+		}
+	}
+	if smsRow == nil {
+		t.Fatalf("no outbox row for the SMS recipient")
+	}
+	if smsRow.Channel != string(models.AlertChannelSMS) || smsRow.Target != "+12125551234" {
+		t.Fatalf("sms row channel/target = %s/%s, want SMS/+12125551234", smsRow.Channel, smsRow.Target)
+	}
+	if smsRow.AlertID != nil || smsRow.NotificationChannelID != nil {
+		t.Fatalf("recipient row must have NULL alert_id and notification_channel_id: %+v", smsRow)
+	}
+
+	// A recipient-sourced row finalizes as a plain delete: no history row, the
+	// exact behavior an old dispatcher binary exhibits (nil/nil source ids).
+	if err := store.FinalizeOutboxAlert(ctx, smsRow.ID, models.StatusDOWN, "delivered", nil, nil); err != nil {
+		t.Fatalf("finalize recipient row: %v", err)
+	}
+	var left int
+	if err := dbc.DB.NewRaw(`SELECT count(*) FROM alert_outbox WHERE id = ?`, smsRow.ID).Scan(ctx, &left); err != nil {
+		t.Fatalf("count outbox: %v", err)
+	}
+	if left != 0 {
+		t.Fatalf("recipient outbox row not deleted on finalize")
+	}
+	var hist int
+	if err := dbc.DB.NewRaw(`SELECT count(*) FROM alert_history WHERE message = 'delivered' AND alert_id IS NULL AND notification_channel_id IS NULL`).Scan(ctx, &hist); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+	if hist != 0 {
+		t.Fatalf("recipient finalize must not write history")
+	}
+
+	// Solo monitors never fan out to org recipients.
+	if got := record(t, dbc, soloMonModel, "ca-east", &models.CheckResult{
+		Status: models.StatusDOWN, Message: "down",
+	}); got != "opened" {
+		t.Fatalf("solo open: got %q, want opened", got)
+	}
+	var soloRecipientRows int
+	if err := dbc.DB.NewRaw(
+		`SELECT count(*) FROM alert_outbox WHERE monitor_id = ? AND org_alert_recipient_id IS NOT NULL`, soloMon.ID,
+	).Scan(ctx, &soloRecipientRows); err != nil {
+		t.Fatalf("count solo recipient rows: %v", err)
+	}
+	if soloRecipientRows != 0 {
+		t.Fatalf("solo monitor produced %d recipient rows, want 0", soloRecipientRows)
+	}
+}
+
 func TestResultWriterBatchFlush(t *testing.T) {
 	dbc := integrationDB(t)
 	ctx := context.Background()
