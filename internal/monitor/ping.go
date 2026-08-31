@@ -81,18 +81,12 @@ func (c *PingChecker) Check(ctx context.Context, target string, timeout time.Dur
 		latency = parsedLatency
 	}
 
-	status := models.StatusUP
-	message := "Host is reachable"
-
-	if latency > 500 {
-		status = models.StatusDEGRADED
-		message = "Host is reachable but high latency"
-	}
-
+	// Slow-but-reachable classification happens in the scheduler (runCheck),
+	// which knows the monitor's effective degraded threshold.
 	return models.CheckResult{
-		Status:  status,
+		Status:  models.StatusUP,
 		Latency: latency,
-		Message: message,
+		Message: "Host is reachable",
 	}
 }
 

@@ -31,6 +31,26 @@ type PlanLimits struct {
 	// (the "alerting seats"): bare EMAIL/SMS contacts that receive alerts for
 	// every org monitor. The owner's own channels don't count.
 	MaxAlertRecipients int
+	// CustomDegradedThreshold allows overriding the per-type slow-response
+	// (DEGRADED) latency threshold on individual monitors. Enforced at
+	// configuration time and re-applied on plan changes: overrides are cleared
+	// when the effective plan loses the capability.
+	CustomDegradedThreshold bool
+	// MaintenanceWindows allows configuring per-monitor alert-suppression
+	// windows. Enforced at configuration time only: existing windows keep
+	// suppressing after a downgrade (grace), the user just can't add more.
+	MaintenanceWindows bool
+	// MaxAlertRepeats caps a monitor's repeat_alert_max_count (0 = the repeat-
+	// alerts feature is unavailable). Enforced at configuration time and
+	// re-applied on plan changes: repeat config is cleared when the effective
+	// plan loses the capability.
+	MaxAlertRepeats int
+	// SSLMonitoring / DomainMonitoring allow the certificate- and domain-
+	// expiry sub-checks on HTTP monitors. Enforced at configuration time and
+	// re-applied on plan changes: the flags are cleared when the effective
+	// plan loses the capability.
+	SSLMonitoring    bool
+	DomainMonitoring bool
 }
 
 // Unlimited is the sentinel used for plans with no cap on a given resource.
@@ -77,9 +97,9 @@ func EffectiveInterval(raw *int, plan string, timeout int) int {
 func LimitsForPlan(plan string) PlanLimits {
 	switch plan {
 	case "PRO":
-		return PlanLimits{MaxMonitors: 20, MaxGlobalChannels: 10, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: 3}
+		return PlanLimits{MaxMonitors: 20, MaxGlobalChannels: 10, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: 3, CustomDegradedThreshold: true}
 	case "ENTERPRISE":
-		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: Unlimited, MaxLoginSeats: 3, MaxAlertRecipients: 3}
+		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: Unlimited, MaxLoginSeats: 3, MaxAlertRecipients: 3, CustomDegradedThreshold: true, MaintenanceWindows: true, MaxAlertRepeats: 10, SSLMonitoring: true, DomainMonitoring: true}
 	default: // FREE and anything unrecognised
 		// Integrations are the only alert destinations (per-monitor alerts no
 		// longer exist), so FREE gets one per allowed channel type — matching

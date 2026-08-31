@@ -137,6 +137,101 @@ func TestCreateMonitor(t *testing.T) {
 		assert.Equal(t, http.StatusPaymentRequired, w.Code)
 	})
 
+	t.Run("custom degraded threshold on FREE returns 402", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor()} // FREE: no custom thresholds
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","degradedThresholdMs":1500}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("custom degraded threshold on PRO is stored", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","degradedThresholdMs":1500}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		if assert.NotNil(t, store.lastCreateDegradedThreshold) {
+			assert.Equal(t, 1500, *store.lastCreateDegradedThreshold)
+		}
+	})
+
+	t.Run("unspecified degraded threshold stores the per-type default (NULL)", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.Nil(t, store.lastCreateDegradedThreshold)
+	})
+
+	t.Run("out-of-bounds degraded threshold returns 400", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","degradedThresholdMs":50}`)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("repeat alerts on non-ENTERPRISE returns 402", func(t *testing.T) {
+		for _, plan := range []string{"FREE", "PRO"} {
+			store := &mockStore{monitorResult: aMonitor()}
+			if plan != "FREE" {
+				store.subResult = aSubscription(plan)
+			}
+			router, h := newTestRouter(store)
+			router.POST("/v1/monitors", h.CreateMonitor)
+
+			w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","repeatAlertIntervalSecs":600,"repeatAlertMaxCount":3}`)
+
+			assert.Equal(t, http.StatusPaymentRequired, w.Code, plan)
+		}
+	})
+
+	t.Run("repeat alerts on ENTERPRISE are stored", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("ENTERPRISE")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","repeatAlertIntervalSecs":600,"repeatAlertMaxCount":3}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+		if assert.NotNil(t, store.lastCreateRepeatInterval) {
+			assert.Equal(t, 600, *store.lastCreateRepeatInterval)
+		}
+		if assert.NotNil(t, store.lastCreateRepeatCount) {
+			assert.Equal(t, 3, *store.lastCreateRepeatCount)
+		}
+	})
+
+	t.Run("repeat count above the plan cap returns 400", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("ENTERPRISE")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","repeatAlertIntervalSecs":600,"repeatAlertMaxCount":50}`)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("one-sided repeat config returns 400", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("ENTERPRISE")}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34","repeatAlertIntervalSecs":600}`)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
 	t.Run("unspecified regions default to the platform default region", func(t *testing.T) {
 		store := &mockStore{monitorResult: aMonitor()}
 		router, h := newTestRouter(store)
@@ -272,6 +367,76 @@ func TestUpdateMonitor(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 
+	t.Run("custom degraded threshold on FREE returns 402", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor()} // FREE: no custom thresholds
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"degradedThresholdMs":1500}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("reverting degraded threshold to default is allowed on FREE", func(t *testing.T) {
+		// 0 clears an override (stores NULL); no capability needed.
+		store := &mockStore{monitorResult: aMonitor()}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"degradedThresholdMs":0}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		if assert.NotNil(t, store.lastUpdateReq) && assert.NotNil(t, store.lastUpdateReq.DegradedThresholdMs) {
+			assert.Equal(t, 0, *store.lastUpdateReq.DegradedThresholdMs)
+		}
+	})
+
+	t.Run("custom degraded threshold on PRO returns 200", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"degradedThresholdMs":1500}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		if assert.NotNil(t, store.lastUpdateReq) && assert.NotNil(t, store.lastUpdateReq.DegradedThresholdMs) {
+			assert.Equal(t, 1500, *store.lastUpdateReq.DegradedThresholdMs)
+		}
+	})
+
+	t.Run("enabling repeat alerts on non-ENTERPRISE returns 402", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("PRO")}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"repeatAlertIntervalSecs":600,"repeatAlertMaxCount":3}`)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+	})
+
+	t.Run("disabling repeat alerts is allowed on any plan", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor()} // FREE
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"repeatAlertIntervalSecs":0,"repeatAlertMaxCount":0}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("enabling repeat alerts on ENTERPRISE returns 200", func(t *testing.T) {
+		store := &mockStore{monitorResult: aMonitor(), subResult: aSubscription("ENTERPRISE")}
+		router, h := newTestRouter(store)
+		router.PUT("/v1/monitors/:id", h.UpdateMonitor)
+
+		w := doRequest(router, "PUT", "/v1/monitors/mon-1", `{"repeatAlertIntervalSecs":600,"repeatAlertMaxCount":3}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		if assert.NotNil(t, store.lastUpdateReq) && assert.NotNil(t, store.lastUpdateReq.RepeatAlertIntervalSecs) {
+			assert.Equal(t, 600, *store.lastUpdateReq.RepeatAlertIntervalSecs)
+		}
+	})
+
 	t.Run("regions beyond the plan cap return 402", func(t *testing.T) {
 		// FREE caps at 1 region per monitor.
 		store := &mockStore{monitorResult: aMonitor()}
@@ -356,6 +521,84 @@ func TestGetMonitorResults(t *testing.T) {
 		router.GET("/v1/monitors/:id/results", h.GetMonitorResults)
 
 		w := doRequest(router, "GET", "/v1/monitors/missing/results", "")
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
+func TestGetMonitorUptime(t *testing.T) {
+	t.Run("defaults to 31 days in UTC", func(t *testing.T) {
+		store := &mockStore{uptimeResult: &models.MonitorUptime{}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 31, store.lastUptimeDays)
+		assert.Equal(t, 0, store.lastUptimeTZOffsetMinutes)
+	})
+
+	t.Run("passes through days and tz offset", func(t *testing.T) {
+		store := &mockStore{uptimeResult: &models.MonitorUptime{}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime?days=7&tzOffsetMinutes=-240", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 7, store.lastUptimeDays)
+		assert.Equal(t, -240, store.lastUptimeTZOffsetMinutes)
+	})
+
+	// Beyond 90 days the rollups' status counts were never backfilled (raw
+	// results only go back that far), so an over-long window falls back to the
+	// default rather than reporting phantom downtime.
+	t.Run("days beyond the retention horizon falls back to the default", func(t *testing.T) {
+		store := &mockStore{uptimeResult: &models.MonitorUptime{}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime?days=400", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 31, store.lastUptimeDays)
+	})
+
+	// A silently-ignored bad offset would surface as off-by-one days, which is
+	// much harder to spot than an error.
+	t.Run("out-of-range tz offset returns 400", func(t *testing.T) {
+		store := &mockStore{uptimeResult: &models.MonitorUptime{}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime?tzOffsetMinutes=2000", "")
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("non-numeric tz offset returns 400", func(t *testing.T) {
+		store := &mockStore{uptimeResult: &models.MonitorUptime{}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime?tzOffsetMinutes=abc", "")
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("monitor not found returns 404", func(t *testing.T) {
+		store := &mockStore{uptimeErr: models.ErrNotFound}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/missing/uptime", "")
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})

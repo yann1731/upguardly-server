@@ -21,7 +21,38 @@ const (
 	MonitorIntervalMax  = 86400 // 24 hours
 	MonitorTimeoutMin   = 5
 	MonitorTimeoutMax   = 300 // 5 minutes
+
+	DegradedThresholdMinMs = 100
+	DegradedThresholdMaxMs = 60000
+
+	// Repeat alerts: minimum spacing between reminders and a static ceiling on
+	// the count (the effective ceiling is the plan's MaxAlertRepeats).
+	RepeatAlertIntervalMinSecs = 300
+	RepeatAlertIntervalMaxSecs = 86400
 )
+
+// DefaultDegradedThresholdMs is the slow-response threshold applied when a
+// monitor has no explicit override: an UP check slower than this is
+// classified DEGRADED.
+func DefaultDegradedThresholdMs(t MonitorType) int {
+	switch t {
+	case MonitorTypePORT:
+		return 1000
+	case MonitorTypePING:
+		return 500
+	default: // HTTP and anything unrecognised
+		return 2000
+	}
+}
+
+// EffectiveDegradedThreshold resolves a monitor's stored threshold (NULL =
+// follow the per-type default) to the value the scheduler should apply.
+func EffectiveDegradedThreshold(raw *int, t MonitorType) int {
+	if raw != nil {
+		return *raw
+	}
+	return DefaultDegradedThresholdMs(t)
+}
 
 type Monitor struct {
 	ID     string      `json:"id"`
@@ -32,13 +63,31 @@ type Monitor struct {
 	// Interval is the effective check interval in seconds — the plan minimum
 	// for follow-plan monitors, or the explicit override. IntervalIsCustom is
 	// false when the monitor follows its plan (stored interval is NULL).
-	Interval         int       `json:"interval"`
-	IntervalIsCustom bool      `json:"intervalIsCustom"`
-	Timeout          int       `json:"timeout"`
-	Enabled          bool      `json:"enabled"`
-	Regions          []string  `json:"regions"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	Interval         int  `json:"interval"`
+	IntervalIsCustom bool `json:"intervalIsCustom"`
+	Timeout          int  `json:"timeout"`
+	Enabled          bool `json:"enabled"`
+	// DegradedThresholdMs is the effective slow-response threshold in
+	// milliseconds — the per-type default, or the explicit override.
+	// DegradedThresholdIsCustom is false when the monitor follows the default
+	// (stored threshold is NULL).
+	DegradedThresholdMs       int  `json:"degradedThresholdMs"`
+	DegradedThresholdIsCustom bool `json:"degradedThresholdIsCustom"`
+	// Repeat alerts (ENTERPRISE): while an incident stays open, re-send its
+	// alert every RepeatAlertIntervalSecs, at most RepeatAlertMaxCount times.
+	// Both nil = feature off; always set or cleared together.
+	RepeatAlertIntervalSecs *int `json:"repeatAlertIntervalSecs,omitempty"`
+	RepeatAlertMaxCount     *int `json:"repeatAlertMaxCount,omitempty"`
+	// Expiry monitoring (ENTERPRISE, HTTP monitors only): alert when the TLS
+	// certificate / registered domain approaches expiry. Configured via
+	// UpdateMonitor; state served by GET /v1/monitors/:id/expiry.
+	CertCheckEnabled          bool      `json:"certCheckEnabled"`
+	CertExpiryThresholdDays   int       `json:"certExpiryThresholdDays"`
+	DomainCheckEnabled        bool      `json:"domainCheckEnabled"`
+	DomainExpiryThresholdDays int       `json:"domainExpiryThresholdDays"`
+	Regions                   []string  `json:"regions"`
+	CreatedAt                 time.Time `json:"createdAt"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 type CreateMonitorRequest struct {
@@ -51,6 +100,19 @@ type CreateMonitorRequest struct {
 	Interval int         `json:"interval"`
 	Timeout  int         `json:"timeout"`
 	Enabled  *bool       `json:"enabled"`
+	// DegradedThresholdMs: nil or 0 means follow the per-type default (stores
+	// NULL); an explicit value is a plan-gated override (PRO/ENTERPRISE).
+	DegradedThresholdMs *int `json:"degradedThresholdMs"`
+	// Repeat alerts (ENTERPRISE): nil/0 = off; both must be set together.
+	RepeatAlertIntervalSecs *int `json:"repeatAlertIntervalSecs"`
+	RepeatAlertMaxCount     *int `json:"repeatAlertMaxCount"`
+	// Expiry monitoring (ENTERPRISE, HTTP only): optional at creation. The
+	// handler applies these via a follow-up UpdateMonitor call so CreateMonitor
+	// itself doesn't need to know about them.
+	CertCheckEnabled          *bool `json:"certCheckEnabled"`
+	CertExpiryThresholdDays   *int  `json:"certExpiryThresholdDays"`
+	DomainCheckEnabled        *bool `json:"domainCheckEnabled"`
+	DomainExpiryThresholdDays *int  `json:"domainExpiryThresholdDays"`
 	// Regions this monitor is checked from. Empty means "not provided": the
 	// handler defaults it to the default region.
 	Regions []string `json:"regions"`
@@ -63,10 +125,25 @@ type UpdateMonitorRequest struct {
 	// Interval: a positive value is an explicit override (must be >= the plan
 	// minimum); 0 is the "revert to follow-plan" sentinel (stores NULL); nil
 	// leaves the interval unchanged.
-	Interval *int      `json:"interval"`
-	Timeout  *int      `json:"timeout"`
-	Enabled  *bool     `json:"enabled"`
-	Regions  *[]string `json:"regions"`
+	Interval *int  `json:"interval"`
+	Timeout  *int  `json:"timeout"`
+	Enabled  *bool `json:"enabled"`
+	// DegradedThresholdMs: a positive value is an explicit override (plan-
+	// gated); 0 is the "revert to per-type default" sentinel (stores NULL);
+	// nil leaves the threshold unchanged.
+	DegradedThresholdMs *int `json:"degradedThresholdMs"`
+	// Repeat alerts: when changing, send both — positive values enable
+	// (plan-gated), 0 on either disables (both store NULL); nil leaves them
+	// unchanged.
+	RepeatAlertIntervalSecs *int `json:"repeatAlertIntervalSecs"`
+	RepeatAlertMaxCount     *int `json:"repeatAlertMaxCount"`
+	// Expiry monitoring (ENTERPRISE, HTTP only): enabling is plan-gated;
+	// disabling is always allowed. Thresholds are days before expiry (1-90).
+	CertCheckEnabled          *bool     `json:"certCheckEnabled"`
+	CertExpiryThresholdDays   *int      `json:"certExpiryThresholdDays"`
+	DomainCheckEnabled        *bool     `json:"domainCheckEnabled"`
+	DomainExpiryThresholdDays *int      `json:"domainExpiryThresholdDays"`
+	Regions                   *[]string `json:"regions"`
 }
 
 // NormalizeRegions dedupes a region list (preserving order) and rejects ids
@@ -124,6 +201,56 @@ func (r *CreateMonitorRequest) Validate() error {
 	if r.Interval != 0 && r.Timeout >= r.Interval {
 		return fmt.Errorf("timeout (%ds) must be less than interval (%ds)", r.Timeout, r.Interval)
 	}
+	if err := validateDegradedThreshold(r.DegradedThresholdMs); err != nil {
+		return err
+	}
+	if err := validateRepeatAlerts(r.RepeatAlertIntervalSecs, r.RepeatAlertMaxCount); err != nil {
+		return err
+	}
+	for _, threshold := range []*int{r.CertExpiryThresholdDays, r.DomainExpiryThresholdDays} {
+		if threshold != nil && (*threshold < ExpiryThresholdMinDays || *threshold > ExpiryThresholdMaxDays) {
+			return fmt.Errorf("expiry threshold must be between %d and %d days", ExpiryThresholdMinDays, ExpiryThresholdMaxDays)
+		}
+	}
+	return nil
+}
+
+// validateDegradedThreshold bounds an explicit slow-response threshold. nil
+// and 0 both mean "follow the per-type default" and are skipped.
+func validateDegradedThreshold(v *int) error {
+	if v == nil || *v == 0 {
+		return nil
+	}
+	if *v < DegradedThresholdMinMs || *v > DegradedThresholdMaxMs {
+		return fmt.Errorf("degraded threshold must be between %d and %d milliseconds", DegradedThresholdMinMs, DegradedThresholdMaxMs)
+	}
+	return nil
+}
+
+// validateRepeatAlerts checks the repeat-alert pair: both absent (nil/0) is
+// off, both positive enables (bounds-checked; the plan's count ceiling is
+// applied in the handler), anything mixed is an error.
+func validateRepeatAlerts(interval, count *int) error {
+	iv := 0
+	if interval != nil {
+		iv = *interval
+	}
+	cv := 0
+	if count != nil {
+		cv = *count
+	}
+	if iv == 0 && cv == 0 {
+		return nil
+	}
+	if iv == 0 || cv == 0 {
+		return fmt.Errorf("repeatAlertIntervalSecs and repeatAlertMaxCount must be set together")
+	}
+	if iv < RepeatAlertIntervalMinSecs || iv > RepeatAlertIntervalMaxSecs {
+		return fmt.Errorf("repeat alert interval must be between %d and %d seconds", RepeatAlertIntervalMinSecs, RepeatAlertIntervalMaxSecs)
+	}
+	if cv < 1 {
+		return fmt.Errorf("repeat alert count must be at least 1")
+	}
 	return nil
 }
 
@@ -141,6 +268,30 @@ func (r *UpdateMonitorRequest) Validate() error {
 	}
 	if r.Timeout != nil && (*r.Timeout < MonitorTimeoutMin || *r.Timeout > MonitorTimeoutMax) {
 		return fmt.Errorf("timeout must be between %d and %d seconds", MonitorTimeoutMin, MonitorTimeoutMax)
+	}
+	if err := validateDegradedThreshold(r.DegradedThresholdMs); err != nil {
+		return err
+	}
+	for _, threshold := range []*int{r.CertExpiryThresholdDays, r.DomainExpiryThresholdDays} {
+		if threshold != nil && (*threshold < ExpiryThresholdMinDays || *threshold > ExpiryThresholdMaxDays) {
+			return fmt.Errorf("expiry threshold must be between %d and %d days", ExpiryThresholdMinDays, ExpiryThresholdMaxDays)
+		}
+	}
+	// Only validate the repeat pair when the request touches it (both nil =
+	// unchanged). A 0 on either side is the "disable" sentinel.
+	if r.RepeatAlertIntervalSecs != nil || r.RepeatAlertMaxCount != nil {
+		iv, cv := 0, 0
+		if r.RepeatAlertIntervalSecs != nil {
+			iv = *r.RepeatAlertIntervalSecs
+		}
+		if r.RepeatAlertMaxCount != nil {
+			cv = *r.RepeatAlertMaxCount
+		}
+		if iv != 0 && cv != 0 {
+			if err := validateRepeatAlerts(&iv, &cv); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

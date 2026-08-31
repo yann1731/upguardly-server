@@ -30,6 +30,8 @@ type mockStore struct {
 	incidentsErr    error
 	statsResult     *models.MonitorStats
 	statsErr        error
+	uptimeResult    *models.MonitorUptime
+	uptimeErr       error
 	deleteErr       error
 
 	// notification channel return values
@@ -78,21 +80,38 @@ type mockStore struct {
 	regionStatusResult []models.MonitorRegionStatus
 	regionStatusErr    error
 
+	// maintenance window return values
+	windowResult    *models.MaintenanceWindow
+	windowErr       error
+	windowsResult   []models.MaintenanceWindow
+	windowsErr      error
+	deleteWindowErr error
+
+	// expiry status return values
+	expiryStatusResult []models.MonitorExpiryStatus
+	expiryStatusErr    error
+
 	// captured call args
-	lastLimit                int
-	lastUpsertSub            *models.UpsertSubscriptionParams
-	deleteOrgCalled          bool
-	lastCreateInterval       *int
-	lastCreateRegions        []string
-	lastUpdateReq            *models.UpdateMonitorRequest
-	lastResultsRegion        string
-	lastChannelCreateChannel string
-	lastChannelCreateTarget  string
-	lastChannelUpdate        *models.UpdateNotificationChannelRequest
-	lastReconcile            *reconcileCall
-	lastRecipientChannel     string
-	lastRecipientTarget      string
-	lastAcceptMaxSeats       int
+	lastLimit                   int
+	lastUptimeDays              int
+	lastUptimeTZOffsetMinutes   int
+	lastUpsertSub               *models.UpsertSubscriptionParams
+	deleteOrgCalled             bool
+	lastCreateInterval          *int
+	lastCreateDegradedThreshold *int
+	lastCreateRepeatInterval    *int
+	lastCreateRepeatCount       *int
+	lastCreateRegions           []string
+	lastCreateWindow            *models.CreateMaintenanceWindowRequest
+	lastUpdateReq               *models.UpdateMonitorRequest
+	lastResultsRegion           string
+	lastChannelCreateChannel    string
+	lastChannelCreateTarget     string
+	lastChannelUpdate           *models.UpdateNotificationChannelRequest
+	lastReconcile               *reconcileCall
+	lastRecipientChannel        string
+	lastRecipientTarget         string
+	lastAcceptMaxSeats          int
 }
 
 // reconcileCall captures one ReconcileMonitorsToPlan invocation.
@@ -102,8 +121,11 @@ type reconcileCall struct {
 	NewPlan string
 }
 
-func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval *int, _ int, _ bool, regions []string) (*models.Monitor, error) {
+func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval *int, _ int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, _ bool, regions []string) (*models.Monitor, error) {
 	m.lastCreateInterval = interval
+	m.lastCreateDegradedThreshold = degradedThresholdMs
+	m.lastCreateRepeatInterval = repeatIntervalSecs
+	m.lastCreateRepeatCount = repeatMaxCount
 	m.lastCreateRegions = regions
 	return m.monitorResult, m.monitorErr
 }
@@ -134,12 +156,30 @@ func (m *mockStore) GetMonitorResults(_ context.Context, _, _ string, limit int,
 func (m *mockStore) ListMonitorRegionStatus(_ context.Context, _, _ string) ([]models.MonitorRegionStatus, error) {
 	return m.regionStatusResult, m.regionStatusErr
 }
+func (m *mockStore) ListMaintenanceWindows(_ context.Context, _ string) ([]models.MaintenanceWindow, error) {
+	return m.windowsResult, m.windowsErr
+}
+func (m *mockStore) CreateMaintenanceWindow(_ context.Context, _ string, req models.CreateMaintenanceWindowRequest) (*models.MaintenanceWindow, error) {
+	m.lastCreateWindow = &req
+	return m.windowResult, m.windowErr
+}
+func (m *mockStore) DeleteMaintenanceWindow(_ context.Context, _, _ string) error {
+	return m.deleteWindowErr
+}
+func (m *mockStore) GetMonitorExpiryStatus(_ context.Context, _ string) ([]models.MonitorExpiryStatus, error) {
+	return m.expiryStatusResult, m.expiryStatusErr
+}
 func (m *mockStore) ListIncidents(_ context.Context, _, _ string, limit int) ([]models.Incident, error) {
 	m.lastLimit = limit
 	return m.incidentsResult, m.incidentsErr
 }
 func (m *mockStore) GetMonitorStats(_ context.Context, _, _ string, _ time.Time) (*models.MonitorStats, error) {
 	return m.statsResult, m.statsErr
+}
+func (m *mockStore) GetMonitorUptime(_ context.Context, _, _ string, days, tzOffsetMinutes int) (*models.MonitorUptime, error) {
+	m.lastUptimeDays = days
+	m.lastUptimeTZOffsetMinutes = tzOffsetMinutes
+	return m.uptimeResult, m.uptimeErr
 }
 
 // ── Notification channel stubs ────────────────────────────────────────────────

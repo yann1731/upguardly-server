@@ -22,13 +22,17 @@ type Incident struct {
 // The top-level aggregates span every region (back-compat with clients that
 // predate regions); Regions carries the same shape per checking region.
 type MonitorStats struct {
-	MinLatency    int           `json:"minLatency"`
-	MaxLatency    int           `json:"maxLatency"`
-	AvgLatency    float64       `json:"avgLatency"`
-	TotalChecks   int           `json:"totalChecks"`
-	IncidentCount int           `json:"incidentCount"`
-	Points        []StatPoint   `json:"points"`
-	Regions       []RegionStats `json:"regions"`
+	MinLatency    int     `json:"minLatency"`
+	MaxLatency    int     `json:"maxLatency"`
+	AvgLatency    float64 `json:"avgLatency"`
+	TotalChecks   int     `json:"totalChecks"`
+	IncidentCount int     `json:"incidentCount"`
+	// MTBFSeconds is the mean gap between one incident's resolution and the
+	// next incident's start within the window, or nil when the window holds
+	// fewer than two incidents (nothing to average).
+	MTBFSeconds *int64        `json:"mtbfSeconds"`
+	Points      []StatPoint   `json:"points"`
+	Regions     []RegionStats `json:"regions"`
 }
 
 // RegionStats is MonitorStats' latency view restricted to one checking region.

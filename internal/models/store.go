@@ -20,7 +20,11 @@ var ErrSeatLimit = errors.New("seat limit reached")
 type Store interface {
 	// Monitors. interval is nil for a follow-plan monitor (resolved to the
 	// plan minimum at read time), or an explicit override in seconds.
-	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, enabled bool, regions []string) (*Monitor, error)
+	// degradedThresholdMs is nil for the per-type default slow-response
+	// threshold, or a plan-gated explicit override in milliseconds.
+	// repeatIntervalSecs/repeatMaxCount enable repeat alerts (ENTERPRISE);
+	// both nil = off, always set together.
+	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, enabled bool, regions []string) (*Monitor, error)
 	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
 	CountMonitorsByUser(ctx context.Context, userId string) (int, error)
 	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
@@ -35,6 +39,20 @@ type Store interface {
 	ListMonitorRegionStatus(ctx context.Context, monitorId, userId string) ([]MonitorRegionStatus, error)
 	ListIncidents(ctx context.Context, monitorId, userId string, limit int) ([]Incident, error)
 	GetMonitorStats(ctx context.Context, monitorId, userId string, since time.Time) (*MonitorStats, error)
+	// GetMonitorUptime returns per-day availability for the last `days`
+	// calendar days, bucketed against tzOffsetMinutes (minutes east of UTC) so
+	// the days line up with the caller's calendar.
+	GetMonitorUptime(ctx context.Context, monitorId, userId string, days, tzOffsetMinutes int) (*MonitorUptime, error)
+
+	// Maintenance windows (per-monitor alert suppression; ENTERPRISE).
+	// Ownership is resolved by the caller via GetMonitor.
+	ListMaintenanceWindows(ctx context.Context, monitorId string) ([]MaintenanceWindow, error)
+	CreateMaintenanceWindow(ctx context.Context, monitorId string, req CreateMaintenanceWindowRequest) (*MaintenanceWindow, error)
+	DeleteMaintenanceWindow(ctx context.Context, monitorId, windowId string) error
+
+	// GetMonitorExpiryStatus returns the monitor's CERT/DOMAIN sub-check
+	// state (whichever rows exist — a sub-check not yet run has none).
+	GetMonitorExpiryStatus(ctx context.Context, monitorId string) ([]MonitorExpiryStatus, error)
 
 	// Notification channels (global, per-user) and per-monitor overrides
 	CreateNotificationChannel(ctx context.Context, userId, channel, target string, enabled bool) (*NotificationChannel, error)
@@ -116,4 +134,20 @@ type SchedulerStore interface {
 	// triggering check, used by the expiry sweep. Returns the incident
 	// transition ("none"/"opened"/"escalated"/"resolved").
 	EvaluateMonitorQuorum(ctx context.Context, monitorID string) (string, error)
+
+	// EnqueueRepeatAlerts runs one pass of the repeat-alert sweep
+	// (maintenance.enqueue_repeat_alerts): re-enqueues outbox alerts for open
+	// incidents whose repeat interval elapsed, honouring maintenance windows.
+	// Safe to run from any number of instances (SKIP LOCKED). Returns the
+	// number of incidents swept.
+	EnqueueRepeatAlerts(ctx context.Context) (int, error)
+
+	// ClaimDueExpiryChecks hands back the next batch of cert/domain expiry
+	// sub-checks due for (re)checking (at most once per 24h per monitor+kind).
+	// Claiming advances checked_at; safe from any number of instances.
+	ClaimDueExpiryChecks(ctx context.Context, limit int) ([]ExpiryCheckClaim, error)
+	// RecordExpiryCheck stores one sub-check's outcome and, on a new alert
+	// bucket crossing, enqueues the alert (see models.ExpiryAlertBucket).
+	// checkErr non-empty records a failure (last_error) and alerts nothing.
+	RecordExpiryCheck(ctx context.Context, claim ExpiryCheckClaim, expiresAt *time.Time, checkErr string) error
 }

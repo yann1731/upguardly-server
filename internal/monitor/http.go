@@ -120,10 +120,9 @@ func (c *HTTPChecker) Check(ctx context.Context, target string, timeout time.Dur
 		message = "Unexpected status"
 	}
 
-	if latency > 2000 && status == models.StatusUP {
-		status = models.StatusDEGRADED
-		message = "High latency"
-	}
+	// Slow-but-up classification happens in the scheduler (runCheck), which
+	// knows the monitor's effective degraded threshold; checkers only report
+	// transport-level status.
 
 	return models.CheckResult{
 		Status:     status,
