@@ -2,20 +2,25 @@ package stripeservice
 
 import (
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 
-	"github.com/stripe/stripe-go/v76"
-	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
-	checkoutsession "github.com/stripe/stripe-go/v76/checkout/session"
-	"github.com/stripe/stripe-go/v76/customer"
-	"github.com/stripe/stripe-go/v76/subscription"
-	"github.com/stripe/stripe-go/v76/webhook"
+	"github.com/stripe/stripe-go/v85"
+	portalsession "github.com/stripe/stripe-go/v85/billingportal/session"
+	checkoutsession "github.com/stripe/stripe-go/v85/checkout/session"
+	"github.com/stripe/stripe-go/v85/customer"
+	"github.com/stripe/stripe-go/v85/subscription"
+	"github.com/stripe/stripe-go/v85/webhook"
 
 	"upguardly-backend/internal/config"
 )
 
 type Client struct {
 	cfg config.StripeConfig
+	// warnedVersions dedupes the API-version drift warning in ParseWebhook so
+	// a mismatched account logs once per version rather than once per event.
+	warnedVersions sync.Map
 }
 
 func NewClient(cfg config.StripeConfig) *Client {
@@ -122,18 +127,30 @@ func (c *Client) CreatePortalSession(customerID, returnURL string) (string, erro
 
 // ParseWebhook verifies and parses a Stripe webhook payload.
 //
-// IgnoreAPIVersionMismatch is set because the Stripe account emits events on a
-// newer API version than this pinned stripe-go release. Without it, every event
-// is rejected by the version check (and surfaced as a misleading signature
-// error). The signature itself is still verified. The fields we read
-// (plan/status/customer/price) are stable across versions; period dates that
-// moved to line items are reconciled separately via the REST API.
+// IgnoreAPIVersionMismatch keeps a version difference between the account and
+// this pinned stripe-go release from rejecting every event (the SDK surfaces
+// that rejection as a misleading signature error). The signature itself is
+// still verified either way.
+//
+// Suppressing the check silently is what let an earlier drift go unnoticed:
+// invoice.subscription had moved under invoice.parent and deserialized as nil
+// on every event. So the mismatch is logged instead of ignored — once per
+// distinct version, since it is a deploy-time condition, not a per-event one.
+// Matching the account's version to stripe.APIVersion silences it.
 func (c *Client) ParseWebhook(payload []byte, sig string) (stripe.Event, error) {
 	event, err := webhook.ConstructEventWithOptions(payload, sig, c.cfg.WebhookSecret, webhook.ConstructEventOptions{
 		IgnoreAPIVersionMismatch: true,
 	})
 	if err != nil {
 		return stripe.Event{}, fmt.Errorf("webhook signature verification failed: %w", err)
+	}
+
+	if event.APIVersion != "" && event.APIVersion != stripe.APIVersion {
+		if _, seen := c.warnedVersions.LoadOrStore(event.APIVersion, struct{}{}); !seen {
+			log.Printf("stripe webhook: account sends API version %s but stripe-go expects %s — "+
+				"fields moved between these versions will deserialize as empty",
+				event.APIVersion, stripe.APIVersion)
+		}
 	}
 	return event, nil
 }
@@ -159,9 +176,9 @@ func (c *Client) SetCancelAtPeriodEnd(subID string, cancel bool) error {
 // an active/trialing/past_due one over a canceled one. Returns (nil, nil) when
 // the customer has no subscriptions.
 //
-// Unlike webhook payloads (which arrive in the account's newer API version),
-// REST responses are pinned to this stripe-go release's API version, so period
-// fields deserialize correctly — making this the source of truth for display.
+// REST responses are pinned to this stripe-go release's API version, so they
+// deserialize predictably regardless of the account's default — making this
+// the source of truth for display.
 func (c *Client) GetActiveSubscription(customerID string) (*stripe.Subscription, error) {
 	params := &stripe.SubscriptionListParams{
 		Customer: stripe.String(customerID),

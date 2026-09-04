@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/stripe/stripe-go/v76"
+	"github.com/stripe/stripe-go/v85"
 
 	"upguardly-backend/internal/models"
 )
@@ -145,9 +145,12 @@ func aStripeSub(priceID string, cancelAtPeriodEnd bool) *stripe.Subscription {
 		Status:            stripe.SubscriptionStatusActive,
 		CancelAtPeriodEnd: cancelAtPeriodEnd,
 		Customer:          &stripe.Customer{ID: "cus_1"},
-		CurrentPeriodEnd:  1702592000,
 		Items: &stripe.SubscriptionItemList{
-			Data: []*stripe.SubscriptionItem{{Price: &stripe.Price{ID: priceID}}},
+			Data: []*stripe.SubscriptionItem{{
+				Price:              &stripe.Price{ID: priceID},
+				CurrentPeriodStart: 1700000000,
+				CurrentPeriodEnd:   1702592000,
+			}},
 		},
 	}
 }
@@ -434,7 +437,10 @@ func TestStripeWebhook(t *testing.T) {
 				Type: "invoice.payment_failed",
 				Data: &stripe.EventData{Raw: json.RawMessage(`{
 					"customer": {"id": "cus_1", "metadata": {"user_id": "test-user-id"}},
-					"subscription": {"id": "sub_1"}
+					"parent": {
+						"type": "subscription_details",
+						"subscription_details": {"subscription": {"id": "sub_1"}}
+					}
 				}`)},
 			},
 		}
@@ -448,6 +454,67 @@ func TestStripeWebhook(t *testing.T) {
 		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
 		assert.Equal(t, "PAST_DUE", store.lastUpsertSub.Status)
 		assert.Nil(t, store.lastReconcile)
+	})
+
+	t.Run("payment failure on a non-subscription invoice is ignored", func(t *testing.T) {
+		// A one-off invoice has no parent.subscription_details, so there is no
+		// entitlement to downgrade. This also pins the field location: the
+		// pre-Basil top-level "subscription" must not be read, or every
+		// subscription invoice silently looks like this one.
+		store := &mockStore{subResult: aSubscription("PRO")}
+		fs := &fakeStripe{
+			event: stripe.Event{
+				Type: "invoice.payment_failed",
+				Data: &stripe.EventData{Raw: json.RawMessage(`{
+					"customer": {"id": "cus_1", "metadata": {"user_id": "test-user-id"}},
+					"subscription": {"id": "sub_1"},
+					"parent": null
+				}`)},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Nil(t, store.lastUpsertSub)
+	})
+
+	t.Run("pause suspends entitlement and resume restores it", func(t *testing.T) {
+		// paused has no member in the SubscriptionStatus enum, so it collapses
+		// to CANCELED (no entitlement). Resume is announced only by
+		// customer.subscription.resumed — without that case the user would
+		// stay downgraded.
+		store := &mockStore{subResult: aSubscription("PRO")}
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			event: stripe.Event{
+				Type: "customer.subscription.paused",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSONWithStatus("price_pro", "paused"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.Equal(t, "CANCELED", store.lastUpsertSub.Status)
+
+		store.lastUpsertSub = nil
+		fs.event = stripe.Event{
+			Type: "customer.subscription.resumed",
+			Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSONWithStatus("price_pro", "active"))},
+		}
+
+		w = doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.Equal(t, "ACTIVE", store.lastUpsertSub.Status)
+		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
 	})
 
 	t.Run("stale-record reconcile against Stripe also reconciles monitors", func(t *testing.T) {
@@ -500,9 +567,11 @@ func subscriptionEventJSONWithStatus(priceID, status string) string {
 		"id": "sub_1",
 		"status": "` + status + `",
 		"customer": {"id": "cus_1", "metadata": {"user_id": "test-user-id"}},
-		"items": {"data": [{"price": {"id": "` + priceID + `"}}]},
-		"current_period_start": 1700000000,
-		"current_period_end": 1702592000
+		"items": {"data": [{
+			"price": {"id": "` + priceID + `"},
+			"current_period_start": 1700000000,
+			"current_period_end": 1702592000
+		}]}
 	}`
 }
 

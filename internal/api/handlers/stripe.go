@@ -1,6 +1,6 @@
 package handlers
 
-import "github.com/stripe/stripe-go/v76"
+import "github.com/stripe/stripe-go/v85"
 
 // StripeService is the subset of the Stripe client the handlers depend on.
 // Defining it as an interface lets tests inject a fake implementation.

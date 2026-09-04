@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/stripe/stripe-go/v76"
+	"github.com/stripe/stripe-go/v85"
 
 	"upguardly-backend/internal/api/handlers"
 	"upguardly-backend/internal/models"
