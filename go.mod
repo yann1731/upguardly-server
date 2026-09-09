@@ -11,12 +11,13 @@ require (
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/sendgrid/sendgrid-go v3.16.1+incompatible
 	github.com/stretchr/testify v1.11.1
-	github.com/stripe/stripe-go/v76 v76.25.0
+	github.com/stripe/stripe-go/v85 v85.2.0
 	github.com/supertokens/supertokens-golang v0.25.2
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18
 	github.com/uptrace/bun/driver/pgdriver v1.2.18
 	go.etcd.io/etcd/client/v3 v3.6.11
+	golang.org/x/net v0.55.0
 )
 
 require (
@@ -75,7 +76,6 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/arch v0.27.0 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect

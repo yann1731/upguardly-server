@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
+
 	"upguardly-backend/internal/models"
+	moncheck "upguardly-backend/internal/monitor"
 )
 
 func (s *BunStore) FetchActiveMonitors(ctx context.Context, region string) ([]models.Monitor, error) {
@@ -42,7 +45,7 @@ func (s *BunStore) FetchOwnedMonitors(ctx context.Context, region string, ownedP
 
 	query := fmt.Sprintf(
 		`SELECT id, user_id, org_id, name, type, target,
-		        "interval", timeout, enabled, regions, created_at, updated_at,
+		        "interval", timeout, degraded_threshold_ms, enabled, regions, created_at, updated_at,
 		        %s AS owner_plan
 		 FROM monitors
 		 WHERE enabled = true AND ? = ANY(regions) AND %s IN (%s)`,
@@ -204,6 +207,182 @@ func (s *BunStore) EvaluateMonitorQuorum(ctx context.Context, monitorID string) 
 		return "none", err
 	}
 	return row.Transition, nil
+}
+
+// ClaimDueExpiryChecks hands the expiry sweep its next batch of due
+// cert/domain sub-checks. Placeholder status rows are inserted lazily for
+// newly enabled monitors; claiming advances checked_at (with SKIP LOCKED on
+// the select), so concurrent instances never double-check and a crashed sweep
+// simply retries the row in 24h.
+func (s *BunStore) ClaimDueExpiryChecks(ctx context.Context, limit int) ([]models.ExpiryCheckClaim, error) {
+	// Seed missing status rows as immediately due (epoch checked_at).
+	if _, err := s.client.DB.NewRaw(`
+		INSERT INTO monitor_expiry_status (monitor_id, kind, checked_at)
+		SELECT m.id, k.kind, to_timestamp(0)
+		  FROM monitors m
+		 CROSS JOIN (VALUES ('CERT'), ('DOMAIN')) AS k(kind)
+		 WHERE m.type = 'HTTP'
+		   AND ((k.kind = 'CERT' AND m.cert_check_enabled)
+		     OR (k.kind = 'DOMAIN' AND m.domain_check_enabled))
+		 ON CONFLICT DO NOTHING`).Exec(ctx); err != nil {
+		return nil, err
+	}
+
+	type claimRow struct {
+		MonitorID     string `bun:"monitor_id"`
+		Kind          string `bun:"kind"`
+		Target        string `bun:"target"`
+		ThresholdDays int    `bun:"threshold_days"`
+	}
+	var rows []claimRow
+	err := s.client.DB.NewRaw(`
+		WITH due AS (
+			SELECT s.monitor_id, s.kind
+			  FROM monitor_expiry_status s
+			  JOIN monitors m ON m.id = s.monitor_id
+			 WHERE s.checked_at < now() - interval '24 hours'
+			   AND m.type = 'HTTP'
+			   AND ((s.kind = 'CERT' AND m.cert_check_enabled)
+			     OR (s.kind = 'DOMAIN' AND m.domain_check_enabled))
+			 ORDER BY s.checked_at
+			 LIMIT ?
+			   FOR UPDATE OF s SKIP LOCKED
+		)
+		UPDATE monitor_expiry_status s
+		   SET checked_at = now()
+		  FROM due
+		  JOIN monitors m ON m.id = due.monitor_id
+		 WHERE s.monitor_id = due.monitor_id AND s.kind = due.kind
+		RETURNING s.monitor_id, s.kind, m.target,
+		          CASE WHEN s.kind = 'CERT' THEN m.cert_expiry_threshold_days
+		               ELSE m.domain_expiry_threshold_days END AS threshold_days`,
+		limit,
+	).Scan(ctx, &rows)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]models.ExpiryCheckClaim, len(rows))
+	for i, r := range rows {
+		out[i] = models.ExpiryCheckClaim{
+			MonitorID:     r.MonitorID,
+			Kind:          models.ExpiryKind(r.Kind),
+			Target:        r.Target,
+			ThresholdDays: r.ThresholdDays,
+		}
+	}
+	return out, nil
+}
+
+// RecordExpiryCheck stores one expiry sub-check outcome and, when the expiry
+// crosses a new alert bucket (threshold/3d/1d/expired — see
+// models.ExpiryAlertBucket), fans an alert out through
+// maintenance.enqueue_monitor_alerts (respecting maintenance windows). A
+// checkErr records last_error and touches nothing else — stale expiry data
+// keeps its bucket state so recovery doesn't re-alert.
+func (s *BunStore) RecordExpiryCheck(ctx context.Context, claim models.ExpiryCheckClaim, expiresAt *time.Time, checkErr string) error {
+	if checkErr != "" {
+		_, err := s.client.DB.NewRaw(`
+			UPDATE monitor_expiry_status SET last_error = ?
+			 WHERE monitor_id = ? AND kind = ?`,
+			checkErr, claim.MonitorID, string(claim.Kind),
+		).Exec(ctx)
+		return err
+	}
+	if expiresAt == nil {
+		return fmt.Errorf("expiry check for %s/%s returned neither a date nor an error", claim.MonitorID, claim.Kind)
+	}
+
+	return s.client.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		var st MonitorExpiryStatus
+		if err := tx.NewSelect().Model(&st).
+			Where("monitor_id = ?", claim.MonitorID).
+			Where("kind = ?", string(claim.Kind)).
+			For("UPDATE").
+			Scan(ctx); err != nil {
+			return err
+		}
+
+		daysLeft := models.ExpiryDaysLeft(*expiresAt, time.Now())
+		bucket := models.ExpiryAlertBucket(daysLeft, claim.ThresholdDays)
+
+		// A bucket fires once per expires_at value: re-arm on renewal
+		// (alerted_expires_at mismatch), then only on deeper buckets.
+		shouldAlert := bucket != nil &&
+			(st.AlertedExpiresAt == nil || !st.AlertedExpiresAt.Equal(*expiresAt) ||
+				st.LastAlertBucket == nil || *bucket < *st.LastAlertBucket)
+
+		upd := tx.NewUpdate().Model((*MonitorExpiryStatus)(nil)).
+			Set("expires_at = ?", *expiresAt).
+			Set("last_error = NULL").
+			Where("monitor_id = ?", claim.MonitorID).
+			Where("kind = ?", string(claim.Kind))
+		if shouldAlert {
+			upd = upd.Set("last_alert_bucket = ?", *bucket).
+				Set("alerted_expires_at = ?", *expiresAt)
+		}
+		if _, err := upd.Exec(ctx); err != nil {
+			return err
+		}
+
+		if !shouldAlert {
+			return nil
+		}
+
+		var inMaintenance bool
+		if err := tx.NewRaw(`SELECT maintenance.in_maintenance(?)`, claim.MonitorID).Scan(ctx, &inMaintenance); err != nil {
+			return err
+		}
+		if inMaintenance {
+			return nil
+		}
+
+		status, message := expiryAlertContent(claim, *expiresAt, daysLeft)
+		var enqueued int
+		return tx.NewRaw(
+			`SELECT maintenance.enqueue_monitor_alerts(?, ?::"Status", ?, NULL::int4, NULL::int4)`,
+			claim.MonitorID, status, message,
+		).Scan(ctx, &enqueued)
+	})
+}
+
+// expiryAlertContent renders the outbox status/message for an expiry alert.
+// The "Status" enum has no expiry-specific value: DEGRADED = approaching,
+// DOWN = expired; the message carries the real content.
+func expiryAlertContent(claim models.ExpiryCheckClaim, expiresAt time.Time, daysLeft int) (string, string) {
+	subject := "TLS certificate for " + claim.Target
+	if claim.Kind == models.ExpiryKindDomain {
+		if domain, err := moncheck.RegistrableDomain(claim.Target); err == nil {
+			subject = "Domain " + domain
+		} else {
+			subject = "Domain for " + claim.Target
+		}
+	}
+	date := expiresAt.UTC().Format("2006-01-02")
+	switch {
+	case daysLeft < 0:
+		return "DOWN", fmt.Sprintf("%s has expired (%s)", subject, date)
+	case daysLeft == 0:
+		return "DEGRADED", fmt.Sprintf("%s expires today (%s)", subject, date)
+	case daysLeft == 1:
+		return "DEGRADED", fmt.Sprintf("%s expires in 1 day (%s)", subject, date)
+	default:
+		return "DEGRADED", fmt.Sprintf("%s expires in %d days (%s)", subject, daysLeft, date)
+	}
+}
+
+// EnqueueRepeatAlerts runs one pass of the repeat-alert sweep. All state
+// logic lives in maintenance.enqueue_repeat_alerts (migration 20260721120000):
+// due open incidents are locked with SKIP LOCKED, re-alerted through
+// maintenance.enqueue_monitor_alerts, and their repeats_sent/last_alert_at
+// advanced — concurrent scheduler instances can't double-send.
+func (s *BunStore) EnqueueRepeatAlerts(ctx context.Context) (int, error) {
+	var swept int
+	err := s.client.DB.NewRaw(`SELECT maintenance.enqueue_repeat_alerts()`).Scan(ctx, &swept)
+	if err != nil {
+		return 0, err
+	}
+	return swept, nil
 }
 
 func (s *BunStore) PersistMonitorResults(ctx context.Context, region string, results []models.PendingResult) error {

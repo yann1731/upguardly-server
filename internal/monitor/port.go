@@ -27,17 +27,11 @@ func (c *PortChecker) Check(ctx context.Context, target string, timeout time.Dur
 	}
 	defer conn.Close()
 
-	status := models.StatusUP
-	message := "Port is open"
-
-	if latency > 1000 {
-		status = models.StatusDEGRADED
-		message = "Port is open but high latency"
-	}
-
+	// Slow-but-open classification happens in the scheduler (runCheck), which
+	// knows the monitor's effective degraded threshold.
 	return models.CheckResult{
-		Status:  status,
+		Status:  models.StatusUP,
 		Latency: latency,
-		Message: message,
+		Message: "Port is open",
 	}
 }

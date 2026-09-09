@@ -27,7 +27,7 @@ func TestCreatePathsPopulateGeneratedColumns(t *testing.T) {
 	user := "create-" + uuid.NewString()
 
 	t.Run("monitor", func(t *testing.T) {
-		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, true, []string{"ca-east"})
+		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, nil, nil, nil, true, []string{"ca-east"})
 		if err != nil {
 			t.Fatalf("CreateMonitor: %v", err)
 		}

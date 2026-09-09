@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/stripe/stripe-go/v76"
+	"github.com/stripe/stripe-go/v85"
 	"github.com/supertokens/supertokens-golang/recipe/emailpassword"
 
 	"upguardly-backend/internal/api/middleware"
@@ -152,12 +152,21 @@ func (h *Handlers) reconcileSubscription(c *gin.Context, userID string, dbSub *m
 }
 
 // upsertParamsFromStripe maps a Stripe subscription to upsert params. Period
-// fields are only set when present (webhook payloads on newer API versions omit
-// them at the top level), so we never overwrite good dates with the epoch.
+// fields are only set when present, so a payload that omits them never
+// overwrites good dates with the epoch.
 func (h *Handlers) upsertParamsFromStripe(userID string, s *stripe.Subscription) (models.UpsertSubscriptionParams, error) {
+	// Price and billing period both hang off the subscription item: the
+	// top-level current_period_start/end were removed from the Subscription
+	// object in Basil. Every subscription we create has exactly one item, so
+	// the first item carries both.
+	var item *stripe.SubscriptionItem
+	if s.Items != nil && len(s.Items.Data) > 0 {
+		item = s.Items.Data[0]
+	}
+
 	var priceID string
-	if len(s.Items.Data) > 0 && s.Items.Data[0].Price != nil {
-		priceID = s.Items.Data[0].Price.ID
+	if item != nil && item.Price != nil {
+		priceID = item.Price.ID
 	}
 
 	plan, err := h.planFromPriceID(priceID)
@@ -179,12 +188,12 @@ func (h *Handlers) upsertParamsFromStripe(userID string, s *stripe.Subscription)
 	if priceID != "" {
 		params.StripePriceID = &priceID
 	}
-	if s.CurrentPeriodStart > 0 {
-		start := time.Unix(s.CurrentPeriodStart, 0)
+	if item != nil && item.CurrentPeriodStart > 0 {
+		start := time.Unix(item.CurrentPeriodStart, 0)
 		params.CurrentPeriodStart = &start
 	}
-	if s.CurrentPeriodEnd > 0 {
-		end := time.Unix(s.CurrentPeriodEnd, 0)
+	if item != nil && item.CurrentPeriodEnd > 0 {
+		end := time.Unix(item.CurrentPeriodEnd, 0)
 		params.CurrentPeriodEnd = &end
 	}
 	return params, nil
@@ -393,7 +402,12 @@ func (h *Handlers) StripeWebhook(c *gin.Context) {
 	}
 
 	switch event.Type {
-	case "customer.subscription.created", "customer.subscription.updated":
+	// paused/resumed carry a full Subscription object like created/updated,
+	// so the same handler maps them. Resume matters most: a resumed
+	// subscription is only announced by customer.subscription.resumed, so
+	// without it a paused user stays downgraded after they come back.
+	case "customer.subscription.created", "customer.subscription.updated",
+		"customer.subscription.paused", "customer.subscription.resumed":
 		h.handleSubscriptionUpdated(c, event)
 	case "customer.subscription.deleted":
 		h.handleSubscriptionDeleted(c, event)
@@ -464,7 +478,13 @@ func (h *Handlers) handlePaymentFailed(c *gin.Context, event stripe.Event) {
 		return
 	}
 
-	if inv.Subscription == nil {
+	// Only subscription invoices affect entitlement. The subscription
+	// reference moved from the top-level invoice.subscription to
+	// invoice.parent.subscription_details.subscription in Basil; reading the
+	// old field silently yielded nil for every event, so this handler never
+	// marked anyone past-due.
+	if inv.Parent == nil || inv.Parent.SubscriptionDetails == nil ||
+		inv.Parent.SubscriptionDetails.Subscription == nil {
 		c.JSON(http.StatusOK, gin.H{"received": true})
 		return
 	}
@@ -534,9 +554,13 @@ func (h *Handlers) CancelSubscription(c *gin.Context) {
 // Statuses that carry no entitlement all collapse to CANCELED: "unpaid" means
 // payment retries are exhausted (Stripe never emits a deleted event for it),
 // "incomplete"/"incomplete_expired" mean the initial payment never succeeded,
-// and "paused" means a trial ended without a payment method. Unknown (future)
-// statuses also map to CANCELED — defaulting to ACTIVE would grant paid
-// access on any status this code doesn't recognise.
+// and "paused" means either a trial that ended without a payment method or a
+// deliberate pause via the Subscriptions pause endpoint. Both suspend service,
+// which is what CANCELED already means here — the SubscriptionStatus DB enum
+// has no PAUSED member, and access is restored when the resumed event arrives
+// with an active status. Unknown (future) statuses also map to CANCELED —
+// defaulting to ACTIVE would grant paid access on any status this code
+// doesn't recognise.
 func mapStripeStatus(s string) string {
 	switch s {
 	case "active":

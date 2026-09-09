@@ -187,12 +187,19 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 				monitors.GET("/:id/results", h.GetMonitorResults)
 				monitors.GET("/:id/incidents", h.GetMonitorIncidents)
 				monitors.GET("/:id/stats", h.GetMonitorStats)
+				monitors.GET("/:id/uptime", h.GetMonitorUptime)
 				monitors.GET("/:id/regions", h.GetMonitorRegions)
+				monitors.GET("/:id/expiry", h.GetMonitorExpiry)
 
 				// Per-monitor opt-in/opt-out of the account's global channels.
 				monitors.GET("/:id/channels", h.ListMonitorChannels)
 				monitors.PUT("/:id/channels/:channelId", middleware.StrictRateLimit(), h.SetMonitorChannel)
 				monitors.DELETE("/:id/channels/:channelId", middleware.StrictRateLimit(), h.DeleteMonitorChannel)
+
+				// Maintenance windows (alert suppression; ENTERPRISE to create).
+				monitors.GET("/:id/maintenance-windows", h.ListMaintenanceWindows)
+				monitors.POST("/:id/maintenance-windows", middleware.StrictRateLimit(), h.CreateMaintenanceWindow)
+				monitors.DELETE("/:id/maintenance-windows/:windowId", middleware.StrictRateLimit(), h.DeleteMaintenanceWindow)
 			}
 
 			// Global (account-level) notification channels — the settings-page

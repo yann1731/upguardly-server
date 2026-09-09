@@ -24,6 +24,8 @@ type checkRunner struct {
 	results    *resultWriter
 	dispatcher *alertDispatcher
 	verifier   *verificationWorker
+	repeater   *alertRepeater
+	expiry     *expirySweeper
 }
 
 func newCheckRunner(store models.SchedulerStore, alertManager *alerter.Manager, region string) *checkRunner {
@@ -33,17 +35,21 @@ func newCheckRunner(store models.SchedulerStore, alertManager *alerter.Manager, 
 		results:    newResultWriter(store, region),
 		dispatcher: newAlertDispatcher(store, alertManager),
 		verifier:   newVerificationWorker(store, region),
+		repeater:   newAlertRepeater(store),
+		expiry:     newExpirySweeper(store),
 	}
 }
 
-// stop drains and stops the result writer, the alert dispatcher, and the
-// verification worker. Call after all jobs are canceled. Any alerts still
-// queued in the outbox are picked up by another instance's dispatcher, or by
-// this one on restart.
+// stop drains and stops the result writer, the alert dispatcher, the
+// verification worker, the repeat-alert sweep, and the expiry sweeper. Call
+// after all jobs are canceled. Any alerts still queued in the outbox are
+// picked up by another instance's dispatcher, or by this one on restart.
 func (r *checkRunner) stop() {
 	r.results.stop()
 	r.dispatcher.stop()
 	r.verifier.stop()
+	r.repeater.stop()
+	r.expiry.stop()
 }
 
 // jobLoop checks m on its interval until ctx is canceled. The first check
@@ -88,6 +94,13 @@ func (r *checkRunner) runCheck(ctx context.Context, m *models.Monitor) {
 
 	timeout := time.Duration(m.Timeout) * time.Second
 	result := checker.Check(ctx, m.Target, timeout)
+
+	// An UP check slower than the monitor's degraded threshold (per-type
+	// default, or a plan-gated per-monitor override) counts as DEGRADED.
+	if result.Status == models.StatusUP && result.Latency > m.DegradedThresholdMs {
+		result.Status = models.StatusDEGRADED
+		result.Message = "High latency"
+	}
 
 	metrics.MonitorChecksTotal.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status), r.region).Inc()
 	metrics.MonitorCheckLatencyMs.WithLabelValues(m.ID, m.Name, string(m.Type), string(result.Status), r.region).Observe(float64(result.Latency))

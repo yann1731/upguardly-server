@@ -80,12 +80,23 @@ type Monitor struct {
 	Target string  `bun:"target,notnull"`
 	// Interval is nullable: NULL = follow the owner's plan (resolved via
 	// OwnerPlan at conversion time); a value is an explicit override.
-	Interval  *int      `bun:"interval"`
-	Timeout   int       `bun:"timeout,notnull,default:30"`
-	Enabled   bool      `bun:"enabled,notnull,default:true"`
-	Regions   []string  `bun:"regions,array,default:'{ca-east}'"`
-	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	Interval *int `bun:"interval"`
+	Timeout  int  `bun:"timeout,notnull,default:30"`
+	// DegradedThresholdMs is nullable: NULL = per-type default slow-response
+	// threshold; a value is a plan-gated explicit override.
+	DegradedThresholdMs *int `bun:"degraded_threshold_ms"`
+	// Repeat alerts (ENTERPRISE): both NULL = off; set/cleared together.
+	RepeatAlertIntervalSecs *int `bun:"repeat_alert_interval_secs"`
+	RepeatAlertMaxCount     *int `bun:"repeat_alert_max_count"`
+	// Expiry monitoring (ENTERPRISE, HTTP only; migration 20260723120000).
+	CertCheckEnabled          bool      `bun:"cert_check_enabled,notnull,default:false"`
+	CertExpiryThresholdDays   int       `bun:"cert_expiry_threshold_days,notnull,default:14"`
+	DomainCheckEnabled        bool      `bun:"domain_check_enabled,notnull,default:false"`
+	DomainExpiryThresholdDays int       `bun:"domain_expiry_threshold_days,notnull,default:14"`
+	Enabled                   bool      `bun:"enabled,notnull,default:true"`
+	Regions                   []string  `bun:"regions,array,default:'{ca-east}'"`
+	CreatedAt                 time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt                 time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 
 	// OwnerPlan is the monitor owner's effective plan, populated by a computed
 	// column on monitor-returning queries (see ownerPlanExpr). Not a stored
@@ -103,6 +114,10 @@ type MonitorResultRollup struct {
 	SumLatency int       `bun:"sum_latency,notnull"`
 	MinLatency int       `bun:"min_latency,notnull"`
 	MaxLatency int       `bun:"max_latency,notnull"`
+	// Per-status counts, the input to availability. DOWN is implied:
+	// Checks - UpChecks - DegradedChecks.
+	UpChecks       int `bun:"up_checks,notnull"`
+	DegradedChecks int `bun:"degraded_checks,notnull"`
 }
 
 type MonitorResult struct {
@@ -129,6 +144,40 @@ type MonitorRegionStatus struct {
 	Message    *string   `bun:"message"`
 	Source     string    `bun:"source,notnull,default:'SCHEDULED'"`
 	CheckedAt  time.Time `bun:"checked_at,nullzero,notnull,default:current_timestamp"`
+}
+
+// MaintenanceWindow is a per-monitor alert-suppression window (migration
+// 20260720120000). ONE_OFF rows carry StartsAt/EndsAt; WEEKLY rows carry
+// Weekday/StartTime/DurationMinutes/Timezone. Suppression itself is evaluated
+// in SQL (maintenance.in_maintenance) at alert-emission time.
+type MaintenanceWindow struct {
+	bun.BaseModel `bun:"table:maintenance_windows,alias:mw"`
+
+	ID              string     `bun:"id,pk"`
+	MonitorID       string     `bun:"monitor_id,notnull"`
+	Kind            string     `bun:"kind,notnull"`
+	StartsAt        *time.Time `bun:"starts_at"`
+	EndsAt          *time.Time `bun:"ends_at"`
+	Weekday         *int       `bun:"weekday"`
+	StartTime       *string    `bun:"start_time"`
+	DurationMinutes *int       `bun:"duration_minutes"`
+	Timezone        *string    `bun:"timezone"`
+	CreatedAt       time.Time  `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+}
+
+// MonitorExpiryStatus tracks one expiry sub-check (CERT or DOMAIN) of an HTTP
+// monitor (migration 20260723120000). Claiming a due check advances CheckedAt;
+// bucket state re-arms when ExpiresAt changes (renewal).
+type MonitorExpiryStatus struct {
+	bun.BaseModel `bun:"table:monitor_expiry_status,alias:mes"`
+
+	MonitorID        string     `bun:"monitor_id,pk"`
+	Kind             string     `bun:"kind,pk"`
+	ExpiresAt        *time.Time `bun:"expires_at"`
+	CheckedAt        time.Time  `bun:"checked_at,nullzero,notnull,default:current_timestamp"`
+	LastError        *string    `bun:"last_error"`
+	LastAlertBucket  *int       `bun:"last_alert_bucket"`
+	AlertedExpiresAt *time.Time `bun:"alerted_expires_at"`
 }
 
 type Incident struct {

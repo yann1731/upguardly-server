@@ -54,23 +54,26 @@ func ownerPlanExpr(alias string) string {
 		           %[1]s.user_id)), 'FREE')`, alias)
 }
 
-func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, enabled bool, regions []string) (*models.Monitor, error) {
+func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, enabled bool, regions []string) (*models.Monitor, error) {
 	var orgIDPtr *string
 	if orgId != "" {
 		orgIDPtr = &orgId
 	}
 	m := &Monitor{
-		ID:        uuid.NewString(),
-		UserID:    userId,
-		OrgID:     orgIDPtr,
-		Name:      name,
-		Type:      monitorType,
-		Target:    target,
-		Interval:  interval,
-		Timeout:   timeout,
-		Enabled:   enabled,
-		Regions:   regions,
-		UpdatedAt: time.Now(),
+		ID:                      uuid.NewString(),
+		UserID:                  userId,
+		OrgID:                   orgIDPtr,
+		Name:                    name,
+		Type:                    monitorType,
+		Target:                  target,
+		Interval:                interval,
+		Timeout:                 timeout,
+		DegradedThresholdMs:     degradedThresholdMs,
+		RepeatAlertIntervalSecs: repeatIntervalSecs,
+		RepeatAlertMaxCount:     repeatMaxCount,
+		Enabled:                 enabled,
+		Regions:                 regions,
+		UpdatedAt:               time.Now(),
 	}
 	if err := s.client.DB.NewInsert().Model(m).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
 		return nil, mapError(err)
@@ -187,9 +190,62 @@ func (s *BunStore) UpdateMonitor(ctx context.Context, id, userId string, req mod
 		q = q.Set("timeout = ?", *req.Timeout)
 		hasUpdates = true
 	}
+	if req.DegradedThresholdMs != nil {
+		// 0 = revert to the per-type default (store NULL); else explicit.
+		if *req.DegradedThresholdMs == 0 {
+			m.DegradedThresholdMs = nil
+			q = q.Set("degraded_threshold_ms = NULL")
+		} else {
+			v := *req.DegradedThresholdMs
+			m.DegradedThresholdMs = &v
+			q = q.Set("degraded_threshold_ms = ?", v)
+		}
+		hasUpdates = true
+	}
+	if req.RepeatAlertIntervalSecs != nil || req.RepeatAlertMaxCount != nil {
+		// The pair is set or cleared together (handler-validated): 0 on
+		// either side disables and stores NULL for both.
+		iv, cv := 0, 0
+		if req.RepeatAlertIntervalSecs != nil {
+			iv = *req.RepeatAlertIntervalSecs
+		}
+		if req.RepeatAlertMaxCount != nil {
+			cv = *req.RepeatAlertMaxCount
+		}
+		if iv == 0 || cv == 0 {
+			m.RepeatAlertIntervalSecs = nil
+			m.RepeatAlertMaxCount = nil
+			q = q.Set("repeat_alert_interval_secs = NULL").Set("repeat_alert_max_count = NULL")
+		} else {
+			m.RepeatAlertIntervalSecs = &iv
+			m.RepeatAlertMaxCount = &cv
+			q = q.Set("repeat_alert_interval_secs = ?", iv).Set("repeat_alert_max_count = ?", cv)
+		}
+		hasUpdates = true
+	}
 	if req.Enabled != nil {
 		m.Enabled = *req.Enabled
 		q = q.Set("enabled = ?", *req.Enabled)
+		hasUpdates = true
+	}
+	if req.CertCheckEnabled != nil {
+		m.CertCheckEnabled = *req.CertCheckEnabled
+		q = q.Set("cert_check_enabled = ?", *req.CertCheckEnabled)
+		hasUpdates = true
+	}
+	if req.CertExpiryThresholdDays != nil {
+		m.CertExpiryThresholdDays = *req.CertExpiryThresholdDays
+		q = q.Set("cert_expiry_threshold_days = ?", *req.CertExpiryThresholdDays)
+		hasUpdates = true
+	}
+	if req.DomainCheckEnabled != nil {
+		m.DomainCheckEnabled = *req.DomainCheckEnabled
+		q = q.Set("domain_check_enabled = ?", *req.DomainCheckEnabled)
+		hasUpdates = true
+	}
+	if req.DomainExpiryThresholdDays != nil {
+		m.DomainExpiryThresholdDays = *req.DomainExpiryThresholdDays
+		q = q.Set("domain_expiry_threshold_days = ?", *req.DomainExpiryThresholdDays)
 		hasUpdates = true
 	}
 	if req.Regions != nil {
@@ -485,13 +541,173 @@ func (s *BunStore) GetMonitorStats(ctx context.Context, monitorId, userId string
 		Model(&incidents).
 		Where("monitor_id = ?", monitorId).
 		Where("started_at >= ?", since).
+		Order("started_at ASC").
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	stats.IncidentCount = len(incidents)
+	stats.MTBFSeconds = meanTimeBetweenFailures(incidents)
 
 	return stats, nil
+}
+
+func (s *BunStore) GetMonitorUptime(ctx context.Context, monitorId, userId string, days, tzOffsetMinutes int) (*models.MonitorUptime, error) {
+	var m Monitor
+	err := s.client.DB.NewSelect().
+		Model(&m).
+		Where("id = ?", monitorId).
+		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Scan(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	// Work in the caller's calendar days, carried as UTC wall-clock dates:
+	// shift now into their offset and truncate to get "today", then shift the
+	// window start back to a real UTC instant for the bucket filter.
+	// Rollups are hourly, so offsets that aren't whole hours (IST, Nepal,
+	// Chatham) land day boundaries up to 45 minutes off — cheaper to accept
+	// than to split buckets.
+	loc := time.FixedZone("client", tzOffsetMinutes*60)
+	nowLocal := time.Now().In(loc)
+	today := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, time.UTC)
+	since := today.AddDate(0, 0, -(days - 1)).Add(-time.Duration(tzOffsetMinutes) * time.Minute)
+
+	var rows []dailyUptimeRow
+	err = s.client.DB.NewSelect().
+		Model((*MonitorResultRollup)(nil)).
+		ColumnExpr("date_trunc('day', bucket + make_interval(mins => ?)) AS day", tzOffsetMinutes).
+		ColumnExpr("region").
+		ColumnExpr("sum(up_checks + degraded_checks) AS available").
+		ColumnExpr("sum(checks) AS total").
+		Where("monitor_id = ?", monitorId).
+		Where("bucket >= ?", since).
+		GroupExpr("1, 2").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	series, uptime7d := computeDailyUptime(rows, today, days)
+	return &models.MonitorUptime{Days: series, Uptime7d: uptime7d}, nil
+}
+
+// meanTimeBetweenFailures averages the recovery-to-next-failure gaps between
+// consecutive incidents (ordered by started_at). Pairs whose earlier incident
+// is still open contribute no gap; nil when no pair qualifies.
+func meanTimeBetweenFailures(incidents []Incident) *int64 {
+	var totalSecs int64
+	var gaps int64
+	for i := 1; i < len(incidents); i++ {
+		prev := incidents[i-1]
+		if prev.ResolvedAt == nil {
+			continue
+		}
+		gap := incidents[i].StartedAt.Sub(*prev.ResolvedAt)
+		if gap < 0 {
+			gap = 0
+		}
+		totalSecs += int64(gap.Seconds())
+		gaps++
+	}
+	if gaps == 0 {
+		return nil
+	}
+	mean := totalSecs / gaps
+	return &mean
+}
+
+// GetMonitorExpiryStatus returns the monitor's CERT/DOMAIN sub-check rows —
+// whichever exist. A sub-check that has never run (never enabled, or enabled
+// but not yet claimed by the scheduler's expiry sweep) has no row.
+func (s *BunStore) GetMonitorExpiryStatus(ctx context.Context, monitorId string) ([]models.MonitorExpiryStatus, error) {
+	var rows []MonitorExpiryStatus
+	err := s.client.DB.NewSelect().
+		Model(&rows).
+		Where("monitor_id = ?", monitorId).
+		Order("kind ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	now := time.Now()
+	out := make([]models.MonitorExpiryStatus, len(rows))
+	for i, r := range rows {
+		var lastErr *string
+		if r.LastError != nil {
+			e := *r.LastError
+			lastErr = &e
+		}
+		var daysLeft *int
+		if r.ExpiresAt != nil {
+			d := models.ExpiryDaysLeft(*r.ExpiresAt, now)
+			daysLeft = &d
+		}
+		out[i] = models.MonitorExpiryStatus{
+			Kind:      models.ExpiryKind(r.Kind),
+			ExpiresAt: r.ExpiresAt,
+			DaysLeft:  daysLeft,
+			CheckedAt: r.CheckedAt,
+			LastError: lastErr,
+		}
+	}
+	return out, nil
+}
+
+// ── Maintenance windows ──────────────────────────────────────────────────────
+
+// ListMaintenanceWindows returns the monitor's windows. Ownership is the
+// caller's problem (handlers resolve it via GetMonitor first).
+func (s *BunStore) ListMaintenanceWindows(ctx context.Context, monitorId string) ([]models.MaintenanceWindow, error) {
+	var rows []MaintenanceWindow
+	err := s.client.DB.NewSelect().
+		Model(&rows).
+		Where("monitor_id = ?", monitorId).
+		Order("created_at ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]models.MaintenanceWindow, len(rows))
+	for i := range rows {
+		out[i] = rows[i].toModel()
+	}
+	return out, nil
+}
+
+func (s *BunStore) CreateMaintenanceWindow(ctx context.Context, monitorId string, req models.CreateMaintenanceWindowRequest) (*models.MaintenanceWindow, error) {
+	w := &MaintenanceWindow{
+		ID:              uuid.NewString(),
+		MonitorID:       monitorId,
+		Kind:            string(req.Kind),
+		StartsAt:        req.StartsAt,
+		EndsAt:          req.EndsAt,
+		Weekday:         req.Weekday,
+		StartTime:       req.StartTime,
+		DurationMinutes: req.DurationMinutes,
+		Timezone:        req.Timezone,
+	}
+	if err := s.client.DB.NewInsert().Model(w).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	model := w.toModel()
+	return &model, nil
+}
+
+func (s *BunStore) DeleteMaintenanceWindow(ctx context.Context, monitorId, windowId string) error {
+	res, err := s.client.DB.NewDelete().
+		Model((*MaintenanceWindow)(nil)).
+		Where("id = ?", windowId).
+		Where("monitor_id = ?", monitorId).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		return models.ErrNotFound
+	}
+	return nil
 }
 
 // ── Notification channels (global, per-user) and per-monitor overrides ─────────
@@ -1209,6 +1425,66 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 		}
 	}
 
+	// Custom slow-response thresholds are plan-gated: once the effective plan
+	// loses the capability, overrides revert to the per-type default.
+	if oldLimits.CustomDegradedThreshold && !newLimits.CustomDegradedThreshold {
+		query := fmt.Sprintf(
+			`UPDATE monitors SET degraded_threshold_ms = NULL, updated_at = now()
+			 WHERE %s AND degraded_threshold_ms IS NOT NULL`,
+			planScopeSQL,
+		)
+		res, err := s.client.DB.NewRaw(query, userId, userId).Exec(ctx)
+		if err != nil {
+			return total, mapError(err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return total, mapError(err)
+		}
+		total += int(rows)
+	}
+
+	// Expiry monitoring flags are plan-gated the same way: losing the
+	// capability switches the sub-checks off (thresholds keep their values —
+	// harmless without the flag, and preserved across a round-trip).
+	if (oldLimits.SSLMonitoring && !newLimits.SSLMonitoring) ||
+		(oldLimits.DomainMonitoring && !newLimits.DomainMonitoring) {
+		query := fmt.Sprintf(
+			`UPDATE monitors SET cert_check_enabled = false, domain_check_enabled = false, updated_at = now()
+			 WHERE %s AND (cert_check_enabled OR domain_check_enabled)`,
+			planScopeSQL,
+		)
+		res, err := s.client.DB.NewRaw(query, userId, userId).Exec(ctx)
+		if err != nil {
+			return total, mapError(err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return total, mapError(err)
+		}
+		total += int(rows)
+	}
+
+	// Repeat alerts are plan-gated the same way: losing the capability clears
+	// the config so downgraded accounts stop getting reminder sends.
+	if oldLimits.MaxAlertRepeats > 0 && newLimits.MaxAlertRepeats == 0 {
+		query := fmt.Sprintf(
+			`UPDATE monitors
+			    SET repeat_alert_interval_secs = NULL, repeat_alert_max_count = NULL, updated_at = now()
+			  WHERE %s AND repeat_alert_interval_secs IS NOT NULL`,
+			planScopeSQL,
+		)
+		res, err := s.client.DB.NewRaw(query, userId, userId).Exec(ctx)
+		if err != nil {
+			return total, mapError(err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return total, mapError(err)
+		}
+		total += int(rows)
+	}
+
 	return total, nil
 }
 
@@ -1363,4 +1639,100 @@ func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.M
 		})
 	}
 	return stats
+}
+
+// ── Uptime calculation helpers ───────────────────────────────────────────────
+
+const dayFormat = "2006-01-02"
+
+// dailyUptimeRow is one (local calendar day, region) group of the uptime
+// query. Available counts UP and DEGRADED checks: degraded means reachable but
+// slow, which still counts as available.
+type dailyUptimeRow struct {
+	Day       time.Time `bun:"day"`
+	Region    string    `bun:"region"`
+	Available int       `bun:"available"`
+	Total     int       `bun:"total"`
+}
+
+// computeDailyUptime shapes the grouped rows into exactly `days` entries ending
+// at `today`, oldest-first, and returns the trailing 7-day figure alongside.
+// Days with no rows are emitted as not-monitored rather than as an outage.
+// `today` is a calendar date carried in UTC; rows must be bucketed against the
+// same offset.
+func computeDailyUptime(rows []dailyUptimeRow, today time.Time, days int) ([]models.DailyUptime, float64) {
+	type acc struct{ available, total int }
+
+	byDay := make(map[string]map[string]*acc)
+	for _, r := range rows {
+		key := r.Day.Format(dayFormat)
+		regions, ok := byDay[key]
+		if !ok {
+			regions = make(map[string]*acc)
+			byDay[key] = regions
+		}
+		a, ok := regions[r.Region]
+		if !ok {
+			a = &acc{}
+			regions[r.Region] = a
+		}
+		a.available += r.Available
+		a.total += r.Total
+	}
+
+	// Region totals over the trailing 7 days, accumulated as we walk.
+	sevenDay := make(map[string]*acc)
+
+	out := make([]models.DailyUptime, 0, days)
+	for i := days - 1; i >= 0; i-- {
+		day := models.DailyUptime{Date: today.AddDate(0, 0, -i).Format(dayFormat)}
+
+		var sum float64
+		var reporting int
+		for region, a := range byDay[day.Date] {
+			if a.total == 0 {
+				continue
+			}
+			// Average each region's share of available checks rather than
+			// pooling raw counts, so a fast-checking region can't outvote a
+			// slower one by sheer volume.
+			sum += float64(a.available) / float64(a.total) * 100
+			reporting++
+
+			if i < 7 {
+				s, ok := sevenDay[region]
+				if !ok {
+					s = &acc{}
+					sevenDay[region] = s
+				}
+				s.available += a.available
+				s.total += a.total
+			}
+		}
+		if reporting > 0 {
+			pct := sum / float64(reporting)
+			day.Monitored = true
+			day.UptimePercent = &pct
+		}
+		out = append(out, day)
+	}
+
+	// Check-weighted within each region, then averaged across regions — an
+	// average of the seven daily percentages would weight a quiet day the same
+	// as a busy one.
+	var sum float64
+	var reporting int
+	for _, a := range sevenDay {
+		if a.total == 0 {
+			continue
+		}
+		sum += float64(a.available) / float64(a.total) * 100
+		reporting++
+	}
+	var uptime7d float64
+	if reporting > 0 {
+		uptime7d = sum / float64(reporting)
+	}
+
+	return out, uptime7d
 }

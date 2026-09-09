@@ -6,18 +6,41 @@ import (
 
 func (m *Monitor) toModel() models.Monitor {
 	return models.Monitor{
-		ID:               m.ID,
-		OrgID:            m.OrgID,
-		Name:             m.Name,
-		Type:             models.MonitorType(m.Type),
-		Target:           m.Target,
-		Interval:         models.EffectiveInterval(m.Interval, m.OwnerPlan, m.Timeout),
-		IntervalIsCustom: m.Interval != nil,
-		Timeout:          m.Timeout,
-		Enabled:          m.Enabled,
-		Regions:          m.Regions,
-		CreatedAt:        m.CreatedAt,
-		UpdatedAt:        m.UpdatedAt,
+		ID:                        m.ID,
+		OrgID:                     m.OrgID,
+		Name:                      m.Name,
+		Type:                      models.MonitorType(m.Type),
+		Target:                    m.Target,
+		Interval:                  models.EffectiveInterval(m.Interval, m.OwnerPlan, m.Timeout),
+		IntervalIsCustom:          m.Interval != nil,
+		Timeout:                   m.Timeout,
+		DegradedThresholdMs:       models.EffectiveDegradedThreshold(m.DegradedThresholdMs, models.MonitorType(m.Type)),
+		DegradedThresholdIsCustom: m.DegradedThresholdMs != nil,
+		RepeatAlertIntervalSecs:   m.RepeatAlertIntervalSecs,
+		RepeatAlertMaxCount:       m.RepeatAlertMaxCount,
+		CertCheckEnabled:          m.CertCheckEnabled,
+		CertExpiryThresholdDays:   m.CertExpiryThresholdDays,
+		DomainCheckEnabled:        m.DomainCheckEnabled,
+		DomainExpiryThresholdDays: m.DomainExpiryThresholdDays,
+		Enabled:                   m.Enabled,
+		Regions:                   m.Regions,
+		CreatedAt:                 m.CreatedAt,
+		UpdatedAt:                 m.UpdatedAt,
+	}
+}
+
+func (w *MaintenanceWindow) toModel() models.MaintenanceWindow {
+	return models.MaintenanceWindow{
+		ID:              w.ID,
+		MonitorID:       w.MonitorID,
+		Kind:            models.MaintenanceWindowKind(w.Kind),
+		StartsAt:        w.StartsAt,
+		EndsAt:          w.EndsAt,
+		Weekday:         w.Weekday,
+		StartTime:       w.StartTime,
+		DurationMinutes: w.DurationMinutes,
+		Timezone:        w.Timezone,
+		CreatedAt:       w.CreatedAt,
 	}
 }
 
