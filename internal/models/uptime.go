@@ -30,5 +30,11 @@ type MonitorUptime struct {
 	// Uptime7d is the trailing 7x24h availability. Check-weighted within each
 	// region rather than an average of the daily percentages, so a quiet day
 	// doesn't count as much as a busy one.
-	Uptime7d float64 `json:"uptime7d"`
+	//
+	// nil when no region reported a single check in those seven days — a
+	// brand-new monitor, or one whose checks never ran. Distinct from 0, which
+	// means checks ran and every one of them failed. Callers must keep the two
+	// apart: rendering nil as 0% makes a monitor created a minute ago look
+	// exactly like one that is completely down.
+	Uptime7d *float64 `json:"uptime7d"`
 }

@@ -571,11 +571,21 @@ func (s *BunStore) GetMonitorUptime(ctx context.Context, monitorId, userId strin
 	// window start back to a real UTC instant for the bucket filter.
 	// Rollups are hourly, so offsets that aren't whole hours (IST, Nepal,
 	// Chatham) land day boundaries up to 45 minutes off — cheaper to accept
-	// than to split buckets.
+	// than to split buckets. This applies to the rollup leg only; the raw leg
+	// below buckets each check by its own timestamp and is exact. The two
+	// therefore classify a day boundary slightly differently either side of the
+	// cutoff, which shifts at most 45 minutes of checks between two adjacent
+	// cells. It is not a double count: see uptimeRawCutoff.
 	loc := time.FixedZone("client", tzOffsetMinutes*60)
 	nowLocal := time.Now().In(loc)
 	today := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, time.UTC)
 	since := today.AddDate(0, 0, -(days - 1)).Add(-time.Duration(tzOffsetMinutes) * time.Minute)
+
+	// Read the older part of the window from the rollups and the recent tail
+	// from raw results. The rollups are only as fresh as the timer that builds
+	// them, so a monitor created minutes ago has no rollup row at all and would
+	// otherwise report an all-grey strip against checks that already ran.
+	cutoff := uptimeRawCutoff(time.Now(), since)
 
 	var rows []dailyUptimeRow
 	err = s.client.DB.NewSelect().
@@ -586,11 +596,37 @@ func (s *BunStore) GetMonitorUptime(ctx context.Context, monitorId, userId strin
 		ColumnExpr("sum(checks) AS total").
 		Where("monitor_id = ?", monitorId).
 		Where("bucket >= ?", since).
+		Where("bucket < ?", cutoff).
 		GroupExpr("1, 2").
 		Scan(ctx, &rows)
 	if err != nil {
 		return nil, mapError(err)
 	}
+
+	// Same columns from raw checks, aggregated in the database rather than
+	// scanned into Go: the dashboard issues one of these per monitor every 60
+	// seconds, and only (days x regions) rows need to cross the wire. Served by
+	// monitor_results_monitor_id_checked_at_idx.
+	var rawRows []dailyUptimeRow
+	err = s.client.DB.NewSelect().
+		Model((*MonitorResult)(nil)).
+		ColumnExpr("date_trunc('day', checked_at + make_interval(mins => ?)) AS day", tzOffsetMinutes).
+		ColumnExpr("region").
+		ColumnExpr("count(*) FILTER (WHERE status IN (?, ?)) AS available",
+			string(models.StatusUP), string(models.StatusDEGRADED)).
+		ColumnExpr("count(*) AS total").
+		Where("monitor_id = ?", monitorId).
+		Where("checked_at >= ?", cutoff).
+		GroupExpr("1, 2").
+		Scan(ctx, &rawRows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	// computeDailyUptime accumulates per (day, region), so the two legs merge by
+	// concatenation — a day the cutoff falls inside sums its rollup and raw
+	// halves rather than one overwriting the other.
+	rows = append(rows, rawRows...)
 
 	series, uptime7d := computeDailyUptime(rows, today, days)
 	return &models.MonitorUptime{Days: series, Uptime7d: uptime7d}, nil
@@ -1488,6 +1524,25 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 const statBuckets = 48
 const rawStatsWindow = 25 * time.Hour
 
+// rawUptimeWindow is how far back the uptime endpoint reads raw monitor_results
+// instead of the hourly rollups.
+//
+// Nothing in Go writes monitor_result_rollups: they are built by
+// maintenance.refresh_rollups(), driven by a host timer every 15 minutes
+// (deploy/app-server/maintenance/db-rollup-refresh.timer). So the newest slice
+// of history is always missing from the rollups, and is missing entirely on a
+// host where that timer was never installed. Reading it raw is what lets a
+// monitor's first day paint within a check interval of creation instead of
+// within a quarter of an hour.
+//
+// 25h matches rawStatsWindow, which draws the same line for the latency stats.
+// The lower bound that would still fix the lag is 3h — the p_lookback default
+// of refresh_rollups, i.e. the window that function still rewrites. A day is
+// deliberately wider than that: it also keeps today and yesterday painting when
+// the refresh timer is dead, which is how this bug was reported in the first
+// place. The cost is one extra index-scanned aggregate over ~a day of rows.
+const rawUptimeWindow = 25 * time.Hour
+
 type rollupRow struct {
 	Region string
 	Bucket time.Time
@@ -1680,7 +1735,9 @@ const dayFormat = "2006-01-02"
 
 // dailyUptimeRow is one (local calendar day, region) group of the uptime
 // query. Available counts UP and DEGRADED checks: degraded means reachable but
-// slow, which still counts as available.
+// slow, which still counts as available. Both legs of the uptime read — the
+// hourly rollups and the raw tail — produce this same shape so they can be
+// concatenated before shaping.
 type dailyUptimeRow struct {
 	Day       time.Time `bun:"day"`
 	Region    string    `bun:"region"`
@@ -1688,12 +1745,39 @@ type dailyUptimeRow struct {
 	Total     int       `bun:"total"`
 }
 
+// uptimeRawCutoff is the instant that divides the two legs of the uptime read:
+// rollups cover [since, cutoff), raw results cover [cutoff, now].
+//
+// Truncating to the hour is what makes the split exact rather than approximate.
+// A rollup's bucket is date_trunc('hour', checked_at), so with cutoff on an
+// hour boundary `bucket < cutoff` and `checked_at < cutoff` select precisely
+// the same checks — every hour is counted from one side and only one side.
+// Computing it in Go and binding the same value into both queries keeps that
+// true even if the app and the database disagree about the clock.
+//
+// Clamped up to since so a short window (?days=1, or any request whose start is
+// already inside the raw window) doesn't hand the rollup leg an inverted range.
+func uptimeRawCutoff(now, since time.Time) time.Time {
+	cutoff := now.Truncate(time.Hour).Add(-rawUptimeWindow)
+	if cutoff.Before(since) {
+		return since
+	}
+	return cutoff
+}
+
 // computeDailyUptime shapes the grouped rows into exactly `days` entries ending
 // at `today`, oldest-first, and returns the trailing 7-day figure alongside.
 // Days with no rows are emitted as not-monitored rather than as an outage.
 // `today` is a calendar date carried in UTC; rows must be bucketed against the
 // same offset.
-func computeDailyUptime(rows []dailyUptimeRow, today time.Time, days int) ([]models.DailyUptime, float64) {
+//
+// Rows may come from more than one source (the hourly rollups and the raw
+// tail); they accumulate per (day, region), so duplicates across sources for
+// the same day sum rather than overwrite.
+//
+// The returned 7-day figure is nil when no region reported a single check in
+// that window — not 0, which is reserved for checks that ran and all failed.
+func computeDailyUptime(rows []dailyUptimeRow, today time.Time, days int) ([]models.DailyUptime, *float64) {
 	type acc struct{ available, total int }
 
 	byDay := make(map[string]map[string]*acc)
@@ -1762,10 +1846,10 @@ func computeDailyUptime(rows []dailyUptimeRow, today time.Time, days int) ([]mod
 		sum += float64(a.available) / float64(a.total) * 100
 		reporting++
 	}
-	var uptime7d float64
-	if reporting > 0 {
-		uptime7d = sum / float64(reporting)
+	if reporting == 0 {
+		return out, nil
 	}
+	uptime7d := sum / float64(reporting)
 
-	return out, uptime7d
+	return out, &uptime7d
 }
