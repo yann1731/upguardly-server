@@ -50,6 +50,11 @@ func TestTelegramSend(t *testing.T) {
 	if !strings.Contains(gotPayload.Text, "DOWN") || !strings.Contains(gotPayload.Text, "connection refused") {
 		t.Errorf("text missing status/message: %q", gotPayload.Text)
 	}
+	// A DOWN check has no round trip to report — the recorded latency is the
+	// checker's timeout (see formatLatency).
+	if strings.Contains(gotPayload.Text, "42ms") {
+		t.Errorf("text reports a latency for a failed check: %q", gotPayload.Text)
+	}
 	// User-controlled fields must be escaped so they can't inject HTML markup.
 	if strings.Contains(gotPayload.Text, "<svc>") {
 		t.Errorf("text contains unescaped monitor name: %q", gotPayload.Text)

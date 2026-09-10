@@ -43,12 +43,12 @@ Monitor: %s
 Status: %s
 Type: %s
 Target: %s
-Latency: %dms
+Latency: %s
 Message: %s
 
 ---
 Sent by Upguardly Monitoring
-`, monitor.Name, result.Status, monitor.Type, monitor.Target, result.Latency, result.Message)
+`, monitor.Name, result.Status, monitor.Type, monitor.Target, formatLatency(result), result.Message)
 
 	from := mail.NewEmail(a.config.FromName, a.config.From)
 	to := mail.NewEmail("", target)

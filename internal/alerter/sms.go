@@ -46,8 +46,8 @@ func (a *SMSAlerter) Send(ctx context.Context, target string, monitor *models.Mo
 		statusEmoji = "⚠️"
 	}
 
-	message := fmt.Sprintf("%s Upguardly: %s is %s\nTarget: %s\nLatency: %dms",
-		statusEmoji, monitor.Name, result.Status, monitor.Target, result.Latency)
+	message := fmt.Sprintf("%s Upguardly: %s is %s\nTarget: %s\nLatency: %s",
+		statusEmoji, monitor.Name, result.Status, monitor.Target, formatLatency(result))
 
 	twilioURL := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Messages.json", a.baseURL, a.config.AccountSID)
 

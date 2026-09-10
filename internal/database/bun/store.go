@@ -507,12 +507,15 @@ func (s *BunStore) GetMonitorStats(ctx context.Context, monitorId, userId string
 		rows := make([]rollupRow, len(rus))
 		for i := range rus {
 			rows[i] = rollupRow{
-				Region:     rus[i].Region,
-				Bucket:     rus[i].Bucket,
-				Checks:     rus[i].Checks,
-				SumLatency: rus[i].SumLatency,
-				MinLatency: rus[i].MinLatency,
-				MaxLatency: rus[i].MaxLatency,
+				Region: rus[i].Region,
+				Bucket: rus[i].Bucket,
+				Checks: rus[i].Checks,
+				// The rollup's latency columns cover UP + DEGRADED checks only,
+				// so those two counts are the latency sample count.
+				LatencyChecks: rus[i].UpChecks + rus[i].DegradedChecks,
+				SumLatency:    rus[i].SumLatency,
+				MinLatency:    rus[i].MinLatency,
+				MaxLatency:    rus[i].MaxLatency,
 			}
 		}
 		stats = computeStatsFromRollups(rows, since, until)
@@ -1494,13 +1497,27 @@ const statBuckets = 48
 const rawStatsWindow = 25 * time.Hour
 
 type rollupRow struct {
-	Region     string
-	Bucket     time.Time
-	Checks     int
-	SumLatency int
-	MinLatency int
-	MaxLatency int
+	Region string
+	Bucket time.Time
+	// Checks counts every check in the bucket; LatencyChecks counts only the
+	// ones that produced a response (UP + DEGRADED) and so is the divisor for
+	// SumLatency. They differ whenever the bucket holds a DOWN check, whose
+	// "latency" is a timeout, not a round trip — see migration
+	// 20260909120000_latency_excludes_down.
+	Checks        int
+	LatencyChecks int
+	SumLatency    int
+	MinLatency    int
+	MaxLatency    int
 }
+
+// measuredLatency reports whether a check of this status actually timed a round
+// trip. A DOWN check's recorded latency is how long the checker waited before
+// giving up — a timeout, not a response time — so it is left out of every
+// latency aggregate. Kept in sync with the `status <> 'DOWN'` FILTER in
+// migration 20260909120000_latency_excludes_down, which applies the same rule
+// to the hourly rollups.
+func measuredLatency(s models.Status) bool { return s != models.StatusDOWN }
 
 func computeStats(rs []MonitorResult, since, until time.Time) *models.MonitorStats {
 	stats := &models.MonitorStats{Points: []models.StatPoint{}}
@@ -1508,21 +1525,31 @@ func computeStats(rs []MonitorResult, since, until time.Time) *models.MonitorSta
 		return stats
 	}
 
-	min, max, sum := rs[0].Latency, rs[0].Latency, 0
+	// Latency aggregates come from responsive checks only. A DOWN row's
+	// latency is the time the checker waited before giving up, so counting it
+	// would report a 30s ping timeout as a 30000ms response time. TotalChecks
+	// still counts every check.
+	min, max, sum, count := 0, 0, 0, 0
 	for i := range rs {
+		if !measuredLatency(models.Status(rs[i].Status)) {
+			continue
+		}
 		l := rs[i].Latency
-		if l < min {
+		if count == 0 || l < min {
 			min = l
 		}
-		if l > max {
+		if count == 0 || l > max {
 			max = l
 		}
 		sum += l
+		count++
 	}
-	stats.MinLatency = min
-	stats.MaxLatency = max
 	stats.TotalChecks = len(rs)
-	stats.AvgLatency = float64(sum) / float64(len(rs))
+	if count > 0 {
+		stats.MinLatency = min
+		stats.MaxLatency = max
+		stats.AvgLatency = float64(sum) / float64(count)
+	}
 
 	span := until.Sub(since)
 	if span <= 0 {
@@ -1536,6 +1563,9 @@ func computeStats(rs []MonitorResult, since, until time.Time) *models.MonitorSta
 	}
 	buckets := make([]acc, statBuckets)
 	for i := range rs {
+		if !measuredLatency(models.Status(rs[i].Status)) {
+			continue
+		}
 		idx := int(rs[i].CheckedAt.Sub(since) / bucketDur)
 		if idx < 0 {
 			idx = 0
@@ -1588,24 +1618,32 @@ func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.M
 		return stats
 	}
 
-	min, max, totalSum, totalCount := rows[0].MinLatency, rows[0].MaxLatency, 0, 0
+	// Rows with no responsive check hold no latency (the rollup writes 0s
+	// there), so they contribute to TotalChecks but never to min/max/avg.
+	min, max, totalSum, latencyCount, totalCount := 0, 0, 0, 0, 0
 	for i := range rows {
-		if rows[i].MinLatency < min {
+		totalCount += rows[i].Checks
+		if rows[i].LatencyChecks == 0 {
+			continue
+		}
+		if latencyCount == 0 || rows[i].MinLatency < min {
 			min = rows[i].MinLatency
 		}
-		if rows[i].MaxLatency > max {
+		if latencyCount == 0 || rows[i].MaxLatency > max {
 			max = rows[i].MaxLatency
 		}
 		totalSum += rows[i].SumLatency
-		totalCount += rows[i].Checks
+		latencyCount += rows[i].LatencyChecks
 	}
 	if totalCount == 0 {
 		return stats
 	}
-	stats.MinLatency = min
-	stats.MaxLatency = max
 	stats.TotalChecks = totalCount
-	stats.AvgLatency = float64(totalSum) / float64(totalCount)
+	if latencyCount > 0 {
+		stats.MinLatency = min
+		stats.MaxLatency = max
+		stats.AvgLatency = float64(totalSum) / float64(latencyCount)
+	}
 
 	span := until.Sub(since)
 	if span <= 0 {
@@ -1619,6 +1657,9 @@ func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.M
 	}
 	buckets := make([]acc, statBuckets)
 	for i := range rows {
+		if rows[i].LatencyChecks == 0 {
+			continue
+		}
 		idx := int(rows[i].Bucket.Sub(since) / bucketDur)
 		if idx < 0 {
 			idx = 0
@@ -1627,7 +1668,7 @@ func computeStatsFromRollups(rows []rollupRow, since, until time.Time) *models.M
 			idx = statBuckets - 1
 		}
 		buckets[idx].sum += rows[i].SumLatency
-		buckets[idx].count += rows[i].Checks
+		buckets[idx].count += rows[i].LatencyChecks
 	}
 	for i, b := range buckets {
 		if b.count == 0 {

@@ -88,14 +88,14 @@ func (a *TelegramAlerter) Send(ctx context.Context, target string, monitor *mode
 	// HTML parse mode with escaped interpolations: user-controlled fields
 	// (name, target, message) must not be able to inject markup.
 	text := fmt.Sprintf(
-		"%s <b>Monitor Alert: %s</b>\nMonitor <b>%s</b> is now <b>%s</b>\n\n<b>Type:</b> %s\n<b>Target:</b> %s\n<b>Latency:</b> %dms\n<b>Message:</b> %s",
+		"%s <b>Monitor Alert: %s</b>\nMonitor <b>%s</b> is now <b>%s</b>\n\n<b>Type:</b> %s\n<b>Target:</b> %s\n<b>Latency:</b> %s\n<b>Message:</b> %s",
 		statusEmoji,
 		html.EscapeString(monitor.Name),
 		html.EscapeString(monitor.Name),
 		result.Status,
 		monitor.Type,
 		html.EscapeString(monitor.Target),
-		result.Latency,
+		formatLatency(result),
 		html.EscapeString(result.Message),
 	)
 

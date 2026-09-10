@@ -51,7 +51,7 @@ func (a *DiscordAlerter) Send(ctx context.Context, target string, monitor *model
 				Fields: []embedField{
 					{Name: "Type", Value: string(monitor.Type), Inline: true},
 					{Name: "Target", Value: monitor.Target, Inline: true},
-					{Name: "Latency", Value: fmt.Sprintf("%dms", result.Latency), Inline: true},
+					{Name: "Latency", Value: formatLatency(result), Inline: true},
 					{Name: "Message", Value: result.Message, Inline: false},
 				},
 			},

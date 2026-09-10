@@ -60,7 +60,7 @@ func TestComputeStatsFromRollupsMatchesRawAggregates(t *testing.T) {
 	var rows []rollupRow
 	for h, a := range hours {
 		rows = append(rows, rollupRow{
-			Bucket: h, Checks: a.count, SumLatency: a.sum,
+			Bucket: h, Checks: a.count, LatencyChecks: a.count, SumLatency: a.sum,
 			MinLatency: a.min, MaxLatency: a.max,
 		})
 	}
@@ -113,9 +113,9 @@ func TestRollupRegionGrouping(t *testing.T) {
 	since, until := base, base.Add(48*time.Hour)
 
 	rows := []rollupRow{
-		{Region: "ca-east", Bucket: base.Add(1 * time.Hour), Checks: 10, SumLatency: 1000, MinLatency: 50, MaxLatency: 200},
-		{Region: "eu-west-fr", Bucket: base.Add(1 * time.Hour), Checks: 5, SumLatency: 1500, MinLatency: 200, MaxLatency: 400},
-		{Region: "ca-east", Bucket: base.Add(2 * time.Hour), Checks: 10, SumLatency: 2000, MinLatency: 100, MaxLatency: 300},
+		{Region: "ca-east", Bucket: base.Add(1 * time.Hour), Checks: 10, LatencyChecks: 10, SumLatency: 1000, MinLatency: 50, MaxLatency: 200},
+		{Region: "eu-west-fr", Bucket: base.Add(1 * time.Hour), Checks: 5, LatencyChecks: 5, SumLatency: 1500, MinLatency: 200, MaxLatency: 400},
+		{Region: "ca-east", Bucket: base.Add(2 * time.Hour), Checks: 10, LatencyChecks: 10, SumLatency: 2000, MinLatency: 100, MaxLatency: 300},
 	}
 
 	regions := rollupRegions(rows)
@@ -152,5 +152,57 @@ func TestRollupRegionGrouping(t *testing.T) {
 	all := computeStatsFromRollups(rows, since, until)
 	if all.TotalChecks != 25 || all.MinLatency != 50 || all.MaxLatency != 400 {
 		t.Fatalf("overall stats = %+v, want 25 checks, min 50, max 400", all)
+	}
+}
+
+// An hour with no responsive check carries no latency (refresh_rollups writes
+// zeros there), and must not drag min/avg down to 0 — it only adds to the check
+// count.
+func TestComputeStatsFromRollupsSkipsLatencylessBuckets(t *testing.T) {
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	since, until := base, base.Add(48*time.Hour)
+
+	rows := []rollupRow{
+		{Bucket: base.Add(1 * time.Hour), Checks: 10, LatencyChecks: 10, SumLatency: 1000, MinLatency: 80, MaxLatency: 120},
+		// A full hour of DOWN checks: counted, but latency-less.
+		{Bucket: base.Add(2 * time.Hour), Checks: 60, LatencyChecks: 0, SumLatency: 0, MinLatency: 0, MaxLatency: 0},
+		{Bucket: base.Add(3 * time.Hour), Checks: 10, LatencyChecks: 10, SumLatency: 1400, MinLatency: 100, MaxLatency: 200},
+	}
+
+	stats := computeStatsFromRollups(rows, since, until)
+
+	if stats.TotalChecks != 80 {
+		t.Errorf("TotalChecks: got %d, want 80 (every check counts)", stats.TotalChecks)
+	}
+	if stats.MinLatency != 80 || stats.MaxLatency != 200 {
+		t.Errorf("latency range: got [%d,%d], want [80,200]", stats.MinLatency, stats.MaxLatency)
+	}
+	if want := 2400.0 / 20.0; stats.AvgLatency != want {
+		t.Errorf("AvgLatency: got %v, want %v (20 responsive samples, not 80)", stats.AvgLatency, want)
+	}
+	if len(stats.Points) != 2 {
+		t.Errorf("got %d points, want 2 — the DOWN-only hour plots nothing", len(stats.Points))
+	}
+}
+
+// The degenerate case: the whole window is down. There is no response time to
+// report, so the aggregates stay at zero rather than reporting the timeout.
+func TestComputeStatsFromRollupsAllDown(t *testing.T) {
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	rows := []rollupRow{
+		{Bucket: base.Add(1 * time.Hour), Checks: 60, LatencyChecks: 0},
+		{Bucket: base.Add(2 * time.Hour), Checks: 60, LatencyChecks: 0},
+	}
+
+	stats := computeStatsFromRollups(rows, base, base.Add(48*time.Hour))
+
+	if stats.TotalChecks != 120 {
+		t.Errorf("TotalChecks: got %d, want 120", stats.TotalChecks)
+	}
+	if stats.MinLatency != 0 || stats.MaxLatency != 0 || stats.AvgLatency != 0 {
+		t.Errorf("all-down window should report no latency, got %+v", stats)
+	}
+	if len(stats.Points) != 0 {
+		t.Errorf("got %d points, want 0", len(stats.Points))
 	}
 }
