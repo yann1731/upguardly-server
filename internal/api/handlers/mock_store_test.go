@@ -74,6 +74,12 @@ type mockStore struct {
 	recipientCountErr  error
 	deleteRecipientErr error
 
+	// member / invitation list return values
+	membersResult     []models.OrganizationMember
+	invitationsResult []models.Invitation
+	expireInvErr      error
+	expiredInvIDs     []string
+
 	// region status return values
 	regionStatusResult []models.MonitorRegionStatus
 	regionStatusErr    error
@@ -238,7 +244,7 @@ func (m *mockStore) GetMembership(_ context.Context, _, _ string) (*models.Organ
 	return m.membershipResult, m.membershipErr
 }
 func (m *mockStore) ListMembers(_ context.Context, _ string) ([]models.OrganizationMember, error) {
-	return nil, nil
+	return m.membersResult, nil
 }
 func (m *mockStore) UpdateMemberRole(_ context.Context, _, _ string, _ models.OrgRole) (*models.OrganizationMember, error) {
 	return nil, nil
@@ -286,7 +292,11 @@ func (m *mockStore) GetInvitationByID(_ context.Context, _ string) (*models.Invi
 	return nil, models.ErrNotFound
 }
 func (m *mockStore) ListInvitations(_ context.Context, _ string) ([]models.Invitation, error) {
-	return nil, nil
+	return m.invitationsResult, nil
+}
+func (m *mockStore) ExpireInvitation(_ context.Context, id string) error {
+	m.expiredInvIDs = append(m.expiredInvIDs, id)
+	return m.expireInvErr
 }
 func (m *mockStore) CountPendingInvitations(_ context.Context, _ string) (int, error) {
 	return m.pendingInvCount, m.pendingInvCountErr

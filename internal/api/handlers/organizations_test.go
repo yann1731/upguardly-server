@@ -172,6 +172,7 @@ func TestAcceptInvitation(t *testing.T) {
 			orgsResult:   []models.Organization{{ID: "org-2", Name: "Existing"}},
 		}
 		router, h := newTestRouter(store)
+		h.UserEmailLookup = func(string) (string, error) { return "user@example.com", nil }
 		router.POST("/v1/invitations/:token/accept", h.AcceptInvitation)
 
 		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")
@@ -187,6 +188,7 @@ func TestAcceptInvitation(t *testing.T) {
 			acceptInviteErr: models.ErrConflict,
 		}
 		router, h := newTestRouter(store)
+		h.UserEmailLookup = func(string) (string, error) { return "user@example.com", nil }
 		router.POST("/v1/invitations/:token/accept", h.AcceptInvitation)
 
 		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")
@@ -202,6 +204,7 @@ func TestAcceptInvitation(t *testing.T) {
 			acceptInviteErr: models.ErrSeatLimit,
 		}
 		router, h := newTestRouter(store)
+		h.UserEmailLookup = func(string) (string, error) { return "user@example.com", nil }
 		router.POST("/v1/invitations/:token/accept", h.AcceptInvitation)
 
 		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")
@@ -217,6 +220,7 @@ func TestAcceptInvitation(t *testing.T) {
 			membershipResult: aMembership(),
 		}
 		router, h := newTestRouter(store)
+		h.UserEmailLookup = func(string) (string, error) { return "user@example.com", nil }
 		router.POST("/v1/invitations/:token/accept", h.AcceptInvitation)
 
 		w := doRequest(router, "POST", "/v1/invitations/sometoken/accept", "")

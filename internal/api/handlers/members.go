@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,18 @@ func (h *Handlers) ListMembers(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list members"})
 		return
+	}
+
+	// SuperTokens owns user records, so emails are resolved per member. Org
+	// size is capped by the plan's login seats, which keeps this N small. A
+	// failed lookup leaves the email blank rather than failing the list.
+	for i := range members {
+		email, err := h.UserEmailLookup(members[i].UserID)
+		if err != nil {
+			log.Printf("[WARN] members: email lookup failed for user %s: %v", members[i].UserID, err)
+			continue
+		}
+		members[i].Email = email
 	}
 
 	c.JSON(http.StatusOK, members)

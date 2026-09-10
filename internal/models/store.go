@@ -100,6 +100,9 @@ type Store interface {
 	// holds the seat it is converting) and returns ErrSeatLimit if exceeded.
 	AcceptInvitation(ctx context.Context, token, userId string, maxLoginSeats int) (*OrganizationMember, error)
 	RevokeInvitation(ctx context.Context, id string) error
+	// ExpireInvitation marks a PENDING invitation whose expiry has passed as
+	// EXPIRED, when a new invitation to the same email supersedes it.
+	ExpireInvitation(ctx context.Context, id string) error
 
 	// Subscriptions (keyed on the user — the billing subject)
 	GetSubscriptionByUser(ctx context.Context, userId string) (*Subscription, error)

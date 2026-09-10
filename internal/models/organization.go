@@ -33,10 +33,14 @@ type Organization struct {
 }
 
 type OrganizationMember struct {
-	ID        string    `json:"id"`
-	OrgID     string    `json:"orgId"`
-	UserID    string    `json:"userId"`
-	Role      OrgRole   `json:"role"`
+	ID     string  `json:"id"`
+	OrgID  string  `json:"orgId"`
+	UserID string  `json:"userId"`
+	Role   OrgRole `json:"role"`
+	// Email is resolved from SuperTokens by the ListMembers handler for
+	// display; it is not stored with the membership. Empty when the lookup
+	// failed.
+	Email     string    `json:"email,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -77,6 +81,19 @@ type Invitation struct {
 	InvitedBy string    `json:"invitedBy"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// InvitationPreview is the public GET /invitations/:token response: enough
+// for the invite page to say who is inviting whom before the invitee signs in.
+// Holding the token (mailed to Email) is the only credential required.
+type InvitationPreview struct {
+	OrgName string  `json:"orgName"`
+	Email   string  `json:"email"`
+	Role    OrgRole `json:"role"`
+	// Status is PENDING, ACCEPTED, REVOKED or EXPIRED. A PENDING row whose
+	// expiry has passed is reported as EXPIRED.
+	Status    string    `json:"status"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 type Subscription struct {
