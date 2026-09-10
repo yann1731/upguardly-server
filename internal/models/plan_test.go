@@ -29,6 +29,44 @@ func TestChannelAllowed(t *testing.T) {
 	}
 }
 
+// EMAIL and SMS address the account holder, so they stay at one apiece on
+// every plan; the webhook and chat channels address a destination and scale
+// with the plan. Mirrored client-side by channelLimitsForPlan
+// (upguardly-client app/dashboard/types.ts).
+func TestMaxChannelsPerPlan(t *testing.T) {
+	tests := []struct {
+		plan    string
+		channel AlertChannel
+		want    int
+		allowed bool
+	}{
+		{"FREE", AlertChannelEMAIL, 1, true},
+		{"FREE", AlertChannelSMS, 1, true},
+		{"FREE", AlertChannelDISCORD, 2, true},
+		{"FREE", AlertChannelSLACK, 0, false},
+		{"PRO", AlertChannelEMAIL, 1, true},
+		{"PRO", AlertChannelSMS, 1, true},
+		{"PRO", AlertChannelDISCORD, 5, true},
+		{"PRO", AlertChannelTELEGRAM, 5, true},
+		{"ENTERPRISE", AlertChannelEMAIL, 1, true},
+		{"ENTERPRISE", AlertChannelSMS, 1, true},
+		{"ENTERPRISE", AlertChannelSLACK, Unlimited, true},
+		// Unknown plans fall back to FREE.
+		{"BOGUS", AlertChannelDISCORD, 2, true},
+	}
+
+	for _, tt := range tests {
+		got, allowed := LimitsForPlan(tt.plan).MaxChannelsFor(tt.channel)
+		if allowed != tt.allowed {
+			t.Errorf("LimitsForPlan(%q).MaxChannelsFor(%s) allowed = %v, want %v", tt.plan, tt.channel, allowed, tt.allowed)
+			continue
+		}
+		if allowed && got != tt.want {
+			t.Errorf("LimitsForPlan(%q).MaxChannelsFor(%s) = %d, want %d", tt.plan, tt.channel, got, tt.want)
+		}
+	}
+}
+
 func TestMaxRegionsPerPlan(t *testing.T) {
 	tests := []struct {
 		plan string
