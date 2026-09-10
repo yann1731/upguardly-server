@@ -6,6 +6,12 @@ import (
 	"github.com/uptrace/bun"
 )
 
+// Column tags deliberately carry no `default:` on fields whose zero value is
+// meaningful: bun substitutes the SQL DEFAULT keyword for any zero-valued
+// field that has one, so `default:true` on a NOT NULL bool silently rewrites
+// an explicit false to the column default (see TestInsertsSendExplicitFalse).
+// The tables keep their own DEFAULTs for inserts that omit the column.
+
 type Organization struct {
 	bun.BaseModel `bun:"table:organizations,alias:o"`
 
@@ -93,7 +99,7 @@ type Monitor struct {
 	CertExpiryThresholdDays   int       `bun:"cert_expiry_threshold_days,notnull,default:14"`
 	DomainCheckEnabled        bool      `bun:"domain_check_enabled,notnull,default:false"`
 	DomainExpiryThresholdDays int       `bun:"domain_expiry_threshold_days,notnull,default:14"`
-	Enabled                   bool      `bun:"enabled,notnull,default:true"`
+	Enabled                   bool      `bun:"enabled,notnull"`
 	Regions                   []string  `bun:"regions,array,default:'{ca-east}'"`
 	CreatedAt                 time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 	UpdatedAt                 time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
@@ -200,7 +206,7 @@ type Alert struct {
 	MonitorID string    `bun:"monitor_id,notnull"`
 	Channel   string    `bun:"channel,notnull"`
 	Target    string    `bun:"target,notnull"`
-	Enabled   bool      `bun:"enabled,notnull,default:true"`
+	Enabled   bool      `bun:"enabled,notnull"`
 	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 }
 
@@ -211,7 +217,7 @@ type NotificationChannel struct {
 	UserID    string    `bun:"user_id,notnull"`
 	Channel   string    `bun:"channel,notnull"`
 	Target    string    `bun:"target,notnull"`
-	Enabled   bool      `bun:"enabled,notnull,default:true"`
+	Enabled   bool      `bun:"enabled,notnull"`
 	CreatedAt time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
 	UpdatedAt time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 }

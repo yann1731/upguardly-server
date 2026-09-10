@@ -143,3 +143,75 @@ func TestCreatePathsPopulateGeneratedColumns(t *testing.T) {
 		}
 	})
 }
+
+// An explicit false must survive the insert. Every `enabled` column here is
+// NOT NULL DEFAULT true, and bun writes the SQL DEFAULT keyword for a
+// zero-valued field carrying a `default:` tag — so `default:true` on the
+// struct field turned CreateNotificationChannel(..., false) into an enabled
+// row. The monitor detail page adds an integration by creating it disabled
+// account-wide and then opting the one monitor in, so the flipped flag made
+// that integration alert for every monitor. TestInsertsSendExplicitFalse
+// checks the same contract on the generated SQL, without a database.
+func TestCreatePathsPersistFalseBooleans(t *testing.T) {
+	ctx := context.Background()
+	s := reconcileTestStore(t)
+	user := "falsebool-" + uuid.NewString()
+
+	t.Run("monitor created paused", func(t *testing.T) {
+		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, nil, nil, nil, false, []string{"ca-east"})
+		if err != nil {
+			t.Fatalf("CreateMonitor: %v", err)
+		}
+		if m.Enabled {
+			t.Error("monitor created with enabled=false came back enabled")
+		}
+		stored, err := s.GetMonitor(ctx, m.ID, user)
+		if err != nil {
+			t.Fatalf("GetMonitor: %v", err)
+		}
+		if stored.Enabled {
+			t.Error("monitor was stored enabled despite enabled=false")
+		}
+	})
+
+	t.Run("notification channel created disabled", func(t *testing.T) {
+		nc, err := s.CreateNotificationChannel(ctx, user, "DISCORD", "https://discord.test/"+uuid.NewString(), false)
+		if err != nil {
+			t.Fatalf("CreateNotificationChannel: %v", err)
+		}
+		if nc.Enabled {
+			t.Error("channel created with enabled=false came back enabled")
+		}
+		stored, err := s.GetNotificationChannel(ctx, nc.ID, user)
+		if err != nil {
+			t.Fatalf("GetNotificationChannel: %v", err)
+		}
+		if stored.Enabled {
+			t.Error("channel was stored enabled despite enabled=false — every monitor without an override would alert on it")
+		}
+	})
+
+	t.Run("monitor channel setting opting out", func(t *testing.T) {
+		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, nil, nil, nil, true, []string{"ca-east"})
+		if err != nil {
+			t.Fatalf("CreateMonitor: %v", err)
+		}
+		nc, err := s.CreateNotificationChannel(ctx, user, "DISCORD", "https://discord.test/"+uuid.NewString(), true)
+		if err != nil {
+			t.Fatalf("CreateNotificationChannel: %v", err)
+		}
+		if _, err := s.UpsertMonitorChannelSetting(ctx, m.ID, nc.ID, false); err != nil {
+			t.Fatalf("UpsertMonitorChannelSetting: %v", err)
+		}
+		settings, err := s.ListMonitorChannelSettings(ctx, m.ID)
+		if err != nil {
+			t.Fatalf("ListMonitorChannelSettings: %v", err)
+		}
+		if len(settings) != 1 {
+			t.Fatalf("got %d settings, want 1", len(settings))
+		}
+		if settings[0].Enabled {
+			t.Error("opt-out override was stored enabled")
+		}
+	})
+}
