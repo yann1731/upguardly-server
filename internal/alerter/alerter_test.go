@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/models"
 )
 
@@ -102,6 +103,42 @@ func TestWebhookTransportErrorHidesTarget(t *testing.T) {
 				t.Errorf("error leaks the webhook URL: %q", err)
 			}
 		})
+	}
+}
+
+// TestSMSTransportErrorHidesURL keeps the SMS alerter on the same sanitized
+// path as the others. Twilio authenticates with a Basic-auth header, so its
+// URL carries only the Account SID rather than a credential — but the error
+// still reaches the logs and alert_history, and holding every alerter to one
+// rule is what stops the next one from reintroducing the leak.
+func TestSMSTransportErrorHidesURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	base := srv.URL
+	srv.Close()
+
+	const accountSID = "AC-ACCOUNT-SID-VALUE"
+	a := NewSMSAlerter(config.TwilioConfig{
+		AccountSID:   accountSID,
+		APIKeySID:    "SK-key-sid",
+		APIKeySecret: "key-secret",
+		FromNumber:   "+12125550000",
+	})
+	a.baseURL = base
+
+	monitor, result := testMonitorAndResult()
+	err := a.Send(context.Background(), "+12125551234", monitor, result)
+	if err == nil {
+		t.Fatal("Send to closed server: want error, got nil")
+	}
+	if strings.Contains(err.Error(), accountSID) {
+		t.Errorf("error leaks the Account SID: %q", err)
+	}
+	if strings.Contains(err.Error(), base) {
+		t.Errorf("error leaks the request URL: %q", err)
+	}
+	// The API key secret is header-borne and must never appear either.
+	if strings.Contains(err.Error(), "key-secret") {
+		t.Errorf("error leaks the API key secret: %q", err)
 	}
 }
 
