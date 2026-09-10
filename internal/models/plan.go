@@ -3,9 +3,14 @@ package models
 // PlanLimits describes the per-plan resource caps. A value of -1 means unlimited.
 type PlanLimits struct {
 	MaxMonitors int
-	// MaxGlobalChannels caps the account-level notification channels (the
-	// user-facing "integrations"), which are the only alert destinations.
-	MaxGlobalChannels int
+	// MaxChannelsOfType caps how many account-level notification channels
+	// (the user-facing "integrations") of each kind may be configured, and
+	// doubles as the plan's channel allow-list: a channel absent from the map
+	// is not available on the plan at all. EMAIL and SMS address the account
+	// holder — one address, one number — so they are capped at one apiece on
+	// every plan; the webhook and chat channels address a destination rather
+	// than a person, and an account may legitimately want several.
+	MaxChannelsOfType map[AlertChannel]int
 	// MinInterval is the smallest allowed check interval (in seconds) for the
 	// plan. Lower tiers are throttled to longer intervals to bound load.
 	// Enforced at configuration time and re-applied to existing monitors
@@ -13,10 +18,6 @@ type PlanLimits struct {
 	// scheduled cancellation keeps its paid plan — and its intervals — until
 	// Stripe ends the billing period, and only then are monitors clamped.
 	MinInterval int
-	// AllowedChannels lists the alert channels the plan may configure.
-	// Enforced only at configuration time: channels created before a
-	// downgrade keep delivering (grace), the user just can't add more.
-	AllowedChannels []AlertChannel
 	// MaxRegions caps how many regions a single monitor may be checked from.
 	// Enforced at configuration time and, like MinInterval, re-applied when
 	// the effective plan changes: once a downgrade lands (after the paid
@@ -56,21 +57,44 @@ type PlanLimits struct {
 // Unlimited is the sentinel used for plans with no cap on a given resource.
 const Unlimited = -1
 
-// Channel sets per tier. Kept in sync with the pricing page copy
-// (upguardly-client app/i18n/locales/*.json, pricing.*.features.integrations).
+// Channel caps per tier. Enforced only at configuration time: channels
+// configured before a downgrade keep delivering (grace), the user just can't
+// add more. Kept in sync with the pricing page copy (upguardly-client
+// app/i18n/locales/*.json, pricing.*.features.integrations) and with
+// channelLimitsForPlan (upguardly-client app/dashboard/types.ts).
 var (
-	freeChannels = []AlertChannel{AlertChannelEMAIL, AlertChannelSMS, AlertChannelDISCORD}
-	paidChannels = []AlertChannel{AlertChannelEMAIL, AlertChannelSMS, AlertChannelDISCORD, AlertChannelSLACK, AlertChannelTELEGRAM}
+	freeChannelCaps = map[AlertChannel]int{
+		AlertChannelEMAIL:   1,
+		AlertChannelSMS:     1,
+		AlertChannelDISCORD: 2,
+	}
+	proChannelCaps = map[AlertChannel]int{
+		AlertChannelEMAIL:    1,
+		AlertChannelSMS:      1,
+		AlertChannelDISCORD:  5,
+		AlertChannelSLACK:    5,
+		AlertChannelTELEGRAM: 5,
+	}
+	enterpriseChannelCaps = map[AlertChannel]int{
+		AlertChannelEMAIL:    1,
+		AlertChannelSMS:      1,
+		AlertChannelDISCORD:  Unlimited,
+		AlertChannelSLACK:    Unlimited,
+		AlertChannelTELEGRAM: Unlimited,
+	}
 )
 
 // ChannelAllowed reports whether the plan may configure alerts on the channel.
 func (l PlanLimits) ChannelAllowed(ch AlertChannel) bool {
-	for _, allowed := range l.AllowedChannels {
-		if allowed == ch {
-			return true
-		}
-	}
-	return false
+	_, ok := l.MaxChannelsOfType[ch]
+	return ok
+}
+
+// MaxChannelsFor returns how many integrations of ch the plan allows (possibly
+// Unlimited) and whether it allows ch at all.
+func (l PlanLimits) MaxChannelsFor(ch AlertChannel) (int, bool) {
+	max, ok := l.MaxChannelsOfType[ch]
+	return max, ok
 }
 
 // EffectiveInterval resolves a monitor's stored interval to the value the
@@ -97,13 +121,14 @@ func EffectiveInterval(raw *int, plan string, timeout int) int {
 func LimitsForPlan(plan string) PlanLimits {
 	switch plan {
 	case "PRO":
-		return PlanLimits{MaxMonitors: 20, MaxGlobalChannels: 10, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: 3, CustomDegradedThreshold: true}
+		return PlanLimits{MaxMonitors: 20, MaxChannelsOfType: proChannelCaps, MinInterval: 60, MaxRegions: 3, CustomDegradedThreshold: true}
 	case "ENTERPRISE":
-		return PlanLimits{MaxMonitors: 200, MaxGlobalChannels: Unlimited, MinInterval: 60, AllowedChannels: paidChannels, MaxRegions: Unlimited, MaxLoginSeats: 3, MaxAlertRecipients: 3, CustomDegradedThreshold: true, MaintenanceWindows: true, MaxAlertRepeats: 10, SSLMonitoring: true, DomainMonitoring: true}
+		return PlanLimits{MaxMonitors: 200, MaxChannelsOfType: enterpriseChannelCaps, MinInterval: 60, MaxRegions: Unlimited, MaxLoginSeats: 3, MaxAlertRecipients: 3, CustomDegradedThreshold: true, MaintenanceWindows: true, MaxAlertRepeats: 10, SSLMonitoring: true, DomainMonitoring: true}
 	default: // FREE and anything unrecognised
 		// Integrations are the only alert destinations (per-monitor alerts no
-		// longer exist), so FREE gets one per allowed channel type — matching
-		// the pricing page's "3 alert integrations".
-		return PlanLimits{MaxMonitors: 5, MaxGlobalChannels: 3, MinInterval: 300, AllowedChannels: freeChannels, MaxRegions: 1}
+		// longer exist): FREE gets the account's own email and number plus a
+		// couple of Discord webhooks, so a monitor can have its own
+		// destination without paying.
+		return PlanLimits{MaxMonitors: 5, MaxChannelsOfType: freeChannelCaps, MinInterval: 300, MaxRegions: 1}
 	}
 }

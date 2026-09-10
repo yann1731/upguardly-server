@@ -748,14 +748,6 @@ func (s *BunStore) ListNotificationChannels(ctx context.Context, userId string) 
 	return out, nil
 }
 
-func (s *BunStore) CountNotificationChannels(ctx context.Context, userId string) (int, error) {
-	count, err := s.client.DB.NewSelect().
-		Model((*NotificationChannel)(nil)).
-		Where("user_id = ?", userId).
-		Count(ctx)
-	return count, mapError(err)
-}
-
 func (s *BunStore) GetNotificationChannel(ctx context.Context, id, userId string) (*models.NotificationChannel, error) {
 	var nc NotificationChannel
 	err := s.client.DB.NewSelect().

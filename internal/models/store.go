@@ -57,7 +57,6 @@ type Store interface {
 	// Notification channels (global, per-user) and per-monitor overrides
 	CreateNotificationChannel(ctx context.Context, userId, channel, target string, enabled bool) (*NotificationChannel, error)
 	ListNotificationChannels(ctx context.Context, userId string) ([]NotificationChannel, error)
-	CountNotificationChannels(ctx context.Context, userId string) (int, error)
 	GetNotificationChannel(ctx context.Context, id, userId string) (*NotificationChannel, error)
 	UpdateNotificationChannel(ctx context.Context, id, userId string, req UpdateNotificationChannelRequest) (*NotificationChannel, error)
 	DeleteNotificationChannel(ctx context.Context, id, userId string) error

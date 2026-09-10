@@ -39,8 +39,6 @@ type mockStore struct {
 	channelErr            error
 	channelsResult        []models.NotificationChannel
 	channelsErr           error
-	channelCount          int
-	channelCountErr       error
 	channelSettingResult  *models.MonitorChannelSetting
 	channelSettingErr     error
 	channelSettingsResult []models.MonitorChannelSetting
@@ -191,9 +189,6 @@ func (m *mockStore) CreateNotificationChannel(_ context.Context, _, channel, tar
 }
 func (m *mockStore) ListNotificationChannels(_ context.Context, _ string) ([]models.NotificationChannel, error) {
 	return m.channelsResult, m.channelsErr
-}
-func (m *mockStore) CountNotificationChannels(_ context.Context, _ string) (int, error) {
-	return m.channelCount, m.channelCountErr
 }
 func (m *mockStore) GetNotificationChannel(_ context.Context, _, _ string) (*models.NotificationChannel, error) {
 	return m.channelResult, m.channelErr
