@@ -15,11 +15,15 @@ import (
 
 type SMSAlerter struct {
 	config config.TwilioConfig
+	// baseURL exists so tests can point Send at an httptest server, matching
+	// TelegramAlerter. Production always uses the real API host.
+	baseURL string
 }
 
 func NewSMSAlerter(cfg config.TwilioConfig) *SMSAlerter {
 	return &SMSAlerter{
-		config: cfg,
+		config:  cfg,
+		baseURL: "https://api.twilio.com",
 	}
 }
 
@@ -45,7 +49,7 @@ func (a *SMSAlerter) Send(ctx context.Context, target string, monitor *models.Mo
 	message := fmt.Sprintf("%s Upguardly: %s is %s\nTarget: %s\nLatency: %dms",
 		statusEmoji, monitor.Name, result.Status, monitor.Target, result.Latency)
 
-	twilioURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", a.config.AccountSID)
+	twilioURL := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Messages.json", a.baseURL, a.config.AccountSID)
 
 	data := url.Values{}
 	data.Set("To", target)
@@ -54,7 +58,8 @@ func (a *SMSAlerter) Send(ctx context.Context, target string, monitor *models.Mo
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, twilioURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		// url.Parse failures are *url.Error and embed the URL.
+		return sanitizeTransportError("failed to create request", err)
 	}
 
 	// API key auth: the URL path is scoped to the Account SID, while the
@@ -64,7 +69,11 @@ func (a *SMSAlerter) Send(ctx context.Context, target string, monitor *models.Mo
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send SMS: %w", err)
+		// Consistent with the other alerters. Twilio authenticates with a
+		// Basic-auth header, so this URL carries only the Account SID — an
+		// identifier, not a credential — but keeping every alerter on one
+		// path means the next one added inherits the safe default.
+		return sanitizeTransportError("failed to send SMS", err)
 	}
 	defer resp.Body.Close()
 

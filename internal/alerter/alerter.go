@@ -2,7 +2,9 @@ package alerter
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/models"
@@ -44,4 +46,24 @@ func (m *Manager) Send(ctx context.Context, channel models.AlertChannel, target 
 	}
 
 	return alerter.Send(ctx, target, monitor, result)
+}
+
+// sanitizeTransportError strips the request URL out of an http.Client failure.
+//
+// Client errors are *url.Error, and its Error() formats as
+// `Post "<url>": <cause>` — so the full URL lands in the message. Every
+// alerter's URL is a credential: the Telegram Bot API puts the bot token in
+// the path, and a Discord or Slack webhook URL *is* the capability to post to
+// that channel (anyone holding it can). These strings are logged on every
+// delivery attempt and persisted to alert_history on the final one (see
+// alertDispatcher in internal/scheduler), so the URL must never reach them.
+//
+// The underlying cause — the DNS/dial/TLS/timeout error operators actually
+// need — is preserved and stays wrapped for errors.Is/As.
+func sanitizeTransportError(op string, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s: %w", op, urlErr.Err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }

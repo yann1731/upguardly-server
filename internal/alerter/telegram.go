@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 
 	"upguardly-backend/internal/config"
@@ -27,6 +28,51 @@ type telegramSendMessagePayload struct {
 	ChatID    string `json:"chat_id"`
 	Text      string `json:"text"`
 	ParseMode string `json:"parse_mode"`
+}
+
+// telegramErrorResponse is the error envelope the Bot API returns alongside a
+// non-2xx status. The description is the only thing that distinguishes the
+// failure modes that matter operationally — "bot can't initiate conversation
+// with a user" (the user never sent /start), "bot was blocked by the user",
+// "chat not found" (wrong id), "not enough rights" (channel, bot not admin) —
+// all of which arrive as a bare 403/400. Reporting the status alone makes
+// every setup mistake look identical in AlertHistory.
+type telegramErrorResponse struct {
+	Description string `json:"description"`
+	Parameters  struct {
+		// RetryAfter is set on 429 and is the number of seconds the API wants
+		// us to wait. Surfaced so the backoff is visible rather than guessed.
+		RetryAfter int `json:"retry_after"`
+	} `json:"parameters"`
+}
+
+// describeTelegramError turns a failed response into an error that names the
+// cause. The body is read under a limit: it is attacker-influenced only via
+// Telegram itself, but an unbounded ReadAll on an error path is how a hung
+// upstream turns into memory pressure across every scheduler pool.
+func describeTelegramError(resp *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if err != nil || len(body) == 0 {
+		return fmt.Errorf("telegram API returned status %d", resp.StatusCode)
+	}
+
+	var parsed telegramErrorResponse
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Description == "" {
+		// Not the documented envelope (a proxy error page, say). Include a
+		// short prefix for diagnosis — the whole string is persisted to
+		// alert_history, so it must stay bounded.
+		snippet := string(body)
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "…"
+		}
+		return fmt.Errorf("telegram API returned status %d: %s", resp.StatusCode, snippet)
+	}
+
+	if parsed.Parameters.RetryAfter > 0 {
+		return fmt.Errorf("telegram API returned status %d: %s (retry after %ds)",
+			resp.StatusCode, parsed.Description, parsed.Parameters.RetryAfter)
+	}
+	return fmt.Errorf("telegram API returned status %d: %s", resp.StatusCode, parsed.Description)
 }
 
 func (a *TelegramAlerter) Send(ctx context.Context, target string, monitor *models.Monitor, result *models.CheckResult) error {
@@ -64,22 +110,26 @@ func (a *TelegramAlerter) Send(ctx context.Context, target string, monitor *mode
 		return fmt.Errorf("failed to marshal telegram payload: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/bot%s/sendMessage", a.baseURL, a.cfg.BotToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	// Contains the bot token: never let this string reach an error message.
+	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", a.baseURL, a.cfg.BotToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		// url.Parse failures are *url.Error and embed the URL too.
+		return sanitizeTransportError("failed to create request", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send telegram message: %w", err)
+		// The endpoint below contains the bot token, so this must not format
+		// the URL — see sanitizeTransportError.
+		return sanitizeTransportError("failed to send telegram message", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("telegram API returned status %d", resp.StatusCode)
+		return describeTelegramError(resp)
 	}
 
 	return nil
