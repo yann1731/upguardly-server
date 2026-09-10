@@ -59,7 +59,7 @@ func (a *SlackAlerter) Send(ctx context.Context, target string, monitor *models.
 				Fields: []slackText{
 					{Type: "mrkdwn", Text: fmt.Sprintf("*Type:*\n%s", monitor.Type)},
 					{Type: "mrkdwn", Text: fmt.Sprintf("*Target:*\n%s", monitor.Target)},
-					{Type: "mrkdwn", Text: fmt.Sprintf("*Latency:*\n%dms", result.Latency)},
+					{Type: "mrkdwn", Text: fmt.Sprintf("*Latency:*\n%s", formatLatency(result))},
 					{Type: "mrkdwn", Text: fmt.Sprintf("*Message:*\n%s", result.Message)},
 				},
 			},

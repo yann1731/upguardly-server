@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -168,5 +169,65 @@ func TestSanitizeTransportErrorNonURLError(t *testing.T) {
 	got := sanitizeTransportError("failed to send", fmt.Errorf("outer: %w", cause))
 	if !errors.Is(got, cause) {
 		t.Errorf("errors.Is(got, cause) = false, want true (got %q)", got)
+	}
+}
+
+// A failed check's latency is the checker's timeout, not a response time — a
+// ping monitor whose host reboots records 30000ms. Every channel must keep that
+// figure out of the alert body; an UP or DEGRADED check still reports its real
+// round trip.
+func TestFormatLatency(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result models.CheckResult
+		want   string
+	}{
+		{"up", models.CheckResult{Status: models.StatusUP, Latency: 42}, "42ms"},
+		{"degraded", models.CheckResult{Status: models.StatusDEGRADED, Latency: 1500}, "1500ms"},
+		{"down after a timeout", models.CheckResult{Status: models.StatusDOWN, Latency: 30000}, "n/a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatLatency(&tc.result); got != tc.want {
+				t.Errorf("formatLatency = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The end-to-end guard: whatever each channel's body looks like, a DOWN alert
+// must not print the timeout as a millisecond figure. Only the two webhook
+// channels can be driven against a local server here; the SMS and Telegram
+// bodies are covered by their own tests, and email builds no request.
+func TestDownAlertBodyOmitsTimeoutLatency(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	monitor := &models.Monitor{Name: "test", Type: models.MonitorTypePING, Target: "example.com"}
+	result := &models.CheckResult{Status: models.StatusDOWN, Latency: 30000, Message: "Ping failed"}
+
+	for _, tc := range []struct {
+		name    string
+		alerter Alerter
+	}{
+		{"discord", NewDiscordAlerter()},
+		{"slack", NewSlackAlerter()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body = ""
+			if err := tc.alerter.Send(context.Background(), srv.URL, monitor, result); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if strings.Contains(body, "30000ms") {
+				t.Errorf("body reports the timeout as a latency: %s", body)
+			}
+			if !strings.Contains(body, "n/a") {
+				t.Errorf("body missing the no-latency placeholder: %s", body)
+			}
+		})
 	}
 }
