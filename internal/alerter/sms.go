@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -78,12 +79,58 @@ func (a *SMSAlerter) Send(ctx context.Context, target string, monitor *models.Mo
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		var errResp map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("Twilio returned status %d: %v", resp.StatusCode, errResp)
+		return describeTwilioError(resp)
 	}
 
 	return nil
+}
+
+// twilioErrorResponse is the error envelope Twilio returns alongside a non-2xx
+// status. Code is Twilio's own error number (21211 invalid To, 20003 auth,
+// 21608 unverified trial recipient, …) and MoreInfo links to its docs page —
+// together they tell a misconfigured channel apart from a Twilio outage.
+type twilioErrorResponse struct {
+	Code     int    `json:"code"`
+	Message  string `json:"message"`
+	MoreInfo string `json:"more_info"`
+}
+
+// describeTwilioError turns a failed response into an error that names the
+// cause. Mirrors describeTelegramError: the body is read under a limit and the
+// result stays bounded, because the string is logged on every delivery
+// attempt and persisted to alert_history on the last one.
+func describeTwilioError(resp *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if err != nil || len(body) == 0 {
+		return fmt.Errorf("Twilio returned status %d", resp.StatusCode)
+	}
+
+	var parsed twilioErrorResponse
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Message == "" {
+		// Not the documented envelope (a proxy error page, a truncated body).
+		// Include a short prefix for diagnosis.
+		snippet := string(body)
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "…"
+		}
+		return fmt.Errorf("Twilio returned status %d: %s", resp.StatusCode, snippet)
+	}
+
+	message := parsed.Message
+	if len(message) > 300 {
+		message = message[:300] + "…"
+	}
+	var details []string
+	if parsed.Code != 0 {
+		details = append(details, fmt.Sprintf("code %d", parsed.Code))
+	}
+	if parsed.MoreInfo != "" && len(parsed.MoreInfo) <= 200 {
+		details = append(details, "see "+parsed.MoreInfo)
+	}
+	if len(details) == 0 {
+		return fmt.Errorf("Twilio returned status %d: %s", resp.StatusCode, message)
+	}
+	return fmt.Errorf("Twilio returned status %d: %s (%s)", resp.StatusCode, message, strings.Join(details, ", "))
 }
 
 // Unused but kept for potential future JSON body approach

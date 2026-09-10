@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,11 +33,24 @@ func (h *Handlers) CreateInvitation(c *gin.Context) {
 		return
 	}
 
-	// Prevent duplicate pending invitations for the same email in this org.
+	// Emails are compared case-insensitively everywhere (the accept check
+	// included), so store them normalized.
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+
+	// Prevent duplicate pending invitations for the same email in this org. A
+	// pending invitation whose expiry has passed no longer blocks: it is marked
+	// EXPIRED and superseded by the new one — this is how an invite is resent.
 	existing, _ := h.store.ListInvitations(c.Request.Context(), orgId)
 	for _, inv := range existing {
-		if inv.Email == req.Email && inv.Status == "PENDING" {
+		if inv.Status != "PENDING" || !strings.EqualFold(inv.Email, email) {
+			continue
+		}
+		if time.Now().Before(inv.ExpiresAt) {
 			c.JSON(http.StatusConflict, gin.H{"error": "A pending invitation already exists for this email address"})
+			return
+		}
+		if err := h.store.ExpireInvitation(c.Request.Context(), inv.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create invitation"})
 			return
 		}
 	}
@@ -76,7 +91,7 @@ func (h *Handlers) CreateInvitation(c *gin.Context) {
 
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	inv, err := h.store.CreateInvitation(c.Request.Context(), orgId, req.Email, callerId, req.Role, tokenHash, expiresAt)
+	inv, err := h.store.CreateInvitation(c.Request.Context(), orgId, email, callerId, req.Role, tokenHash, expiresAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create invitation"})
 		return
@@ -87,11 +102,14 @@ func (h *Handlers) CreateInvitation(c *gin.Context) {
 	if org != nil && h.mailer != nil {
 		websiteDomain := os.Getenv("WEBSITE_DOMAIN")
 		if websiteDomain == "" {
-			// Log the misconfiguration but don't silently send broken links.
-			_ = fmt.Errorf("WEBSITE_DOMAIN is not set; invitation email will not be sent")
+			// Don't send a broken link; the invitation still exists and can be
+			// resent once the misconfiguration is fixed.
+			log.Printf("[WARN] invitations: WEBSITE_DOMAIN is not set; email for invitation %s not sent", inv.ID)
 		} else {
 			acceptURL := fmt.Sprintf("%s/invitations/%s", websiteDomain, rawToken)
-			_ = h.mailer.SendInvitation(req.Email, org.Name, callerId, acceptURL)
+			if err := h.mailer.SendInvitation(email, org.Name, h.inviterName(callerId), acceptURL); err != nil {
+				log.Printf("[WARN] invitations: sending email for invitation %s failed: %v", inv.ID, err)
+			}
 		}
 	}
 
@@ -99,6 +117,16 @@ func (h *Handlers) CreateInvitation(c *gin.Context) {
 	// needed (e.g., in tests). Never exposed again after this response.
 	inv.Token = rawToken
 	c.JSON(http.StatusCreated, inv)
+}
+
+// inviterName is how the invitation email names the inviter. SuperTokens only
+// knows the account email; fall back to a neutral phrase rather than putting
+// the internal user ID in front of the invitee.
+func (h *Handlers) inviterName(userID string) string {
+	if email, err := h.UserEmailLookup(userID); err == nil && email != "" {
+		return email
+	}
+	return "A teammate"
 }
 
 func (h *Handlers) ListInvitations(c *gin.Context) {
@@ -145,6 +173,44 @@ func (h *Handlers) RevokeInvitation(c *gin.Context) {
 	c.JSON(http.StatusNoContent, nil)
 }
 
+// GetInvitationPreview is public: the invite page renders it before the
+// invitee has signed in, so they know which org, role and email the link is
+// for — and which account to sign in or register with. The token (256 random
+// bits, mailed to the invitee) is the only credential; only its hash is
+// looked up, and the response carries no token or IDs.
+func (h *Handlers) GetInvitationPreview(c *gin.Context) {
+	inv, err := h.store.GetInvitationByToken(c.Request.Context(), hashToken(c.Param("token")))
+	if err != nil {
+		if errors.Is(err, models.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load invitation"})
+		return
+	}
+
+	org, err := h.store.GetOrganization(c.Request.Context(), inv.OrgID)
+	if err != nil || org == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
+		return
+	}
+
+	// Nothing expires invitations on a schedule, so report a lapsed PENDING
+	// row the way the accept endpoint will treat it.
+	status := inv.Status
+	if status == "PENDING" && time.Now().After(inv.ExpiresAt) {
+		status = "EXPIRED"
+	}
+
+	c.JSON(http.StatusOK, models.InvitationPreview{
+		OrgName:   org.Name,
+		Email:     inv.Email,
+		Role:      inv.Role,
+		Status:    status,
+		ExpiresAt: inv.ExpiresAt,
+	})
+}
+
 // AcceptInvitation is a protected endpoint: the caller must be authenticated.
 func (h *Handlers) AcceptInvitation(c *gin.Context) {
 	userId, ok := middleware.GetUserID(c)
@@ -174,6 +240,23 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 		return
 	}
 
+	// An invitation is addressed to one email; only the account holding that
+	// email may accept it. Otherwise anyone the link reaches — a forwarded
+	// email, a shared screen — could join the org.
+	accountEmail, err := h.UserEmailLookup(userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify your account email"})
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(accountEmail), strings.TrimSpace(inv.Email)) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":        "This invitation was sent to a different email address",
+			"code":         "email_mismatch",
+			"invitedEmail": inv.Email,
+		})
+		return
+	}
+
 	// A user may belong to at most one organization.
 	if existing, err := h.store.ListOrganizations(c.Request.Context(), userId); err == nil && len(existing) > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "You already belong to an organization"})
@@ -189,6 +272,11 @@ func (h *Handlers) AcceptInvitation(c *gin.Context) {
 		}
 		if errors.Is(err, models.ErrConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "You already belong to an organization"})
+			return
+		}
+		if errors.Is(err, models.ErrNotFound) {
+			// Revoked or expired between the check above and the transaction.
+			c.JSON(http.StatusConflict, gin.H{"error": "Invitation is no longer valid"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})

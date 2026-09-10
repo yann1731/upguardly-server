@@ -113,6 +113,9 @@ func (s *BunStore) ListMonitors(ctx context.Context, userId string) ([]models.Mo
 		ColumnExpr("m.*").
 		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		// A stable base order so the dashboard doesn't reshuffle between
+		// refreshes; the client applies the user's chosen sort on top.
+		Order("m.created_at ASC", "m.id ASC").
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -1050,6 +1053,7 @@ func (s *BunStore) ListMembers(ctx context.Context, orgId string) ([]models.Orga
 	err := s.client.DB.NewSelect().
 		Model(&members).
 		Where("organization_id = ?", orgId).
+		Order("created_at ASC").
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -1221,6 +1225,7 @@ func (s *BunStore) ListInvitations(ctx context.Context, orgId string) ([]models.
 	err := s.client.DB.NewSelect().
 		Model(&invitations).
 		Where("organization_id = ?", orgId).
+		Order("created_at DESC").
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -1246,10 +1251,14 @@ func (s *BunStore) AcceptInvitation(ctx context.Context, token, userId string, m
 	var member OrganizationMember
 
 	err := s.client.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		// Re-check validity under a row lock: the handler's pre-check ran
+		// outside this transaction, so a revoke or expiry landing in between
+		// must not be converted into a membership. No row → ErrNotFound.
 		var inv Invitation
 		err := tx.NewSelect().
 			Model(&inv).
-			Where("token = ?", token).
+			Where("token = ? AND status = 'PENDING' AND expires_at > now()", token).
+			For("UPDATE").
 			Scan(ctx)
 		if err != nil {
 			return err
@@ -1325,11 +1334,25 @@ func (s *BunStore) RevokeInvitation(ctx context.Context, id string) error {
 		return mapError(err)
 	}
 
+	// Only a pending invitation can be revoked; an already-accepted one must
+	// stay ACCEPTED even if a revoke races the accept.
 	inv.Status = "REVOKED"
 	_, err = s.client.DB.NewUpdate().
 		Model(&inv).
-		Where("id = ?", id).
+		Where("id = ? AND status = 'PENDING'", id).
 		Set("status = ?", "REVOKED").
+		Exec(ctx)
+	return mapError(err)
+}
+
+// ExpireInvitation marks a lapsed PENDING invitation EXPIRED. Nothing expires
+// invitations on a schedule; this runs when a new invitation supersedes one,
+// so the old row moves to the invitations history instead of blocking re-invites.
+func (s *BunStore) ExpireInvitation(ctx context.Context, id string) error {
+	_, err := s.client.DB.NewUpdate().
+		Model((*Invitation)(nil)).
+		Where("id = ? AND status = 'PENDING'", id).
+		Set("status = ?", "EXPIRED").
 		Exec(ctx)
 	return mapError(err)
 }

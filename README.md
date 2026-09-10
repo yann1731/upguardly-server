@@ -44,7 +44,7 @@ The codebase ships **two binaries**:
 - **Billing:** [Stripe](https://github.com/stripe/stripe-go) (`stripe-go/v76`)
 - **Distributed coordination:** [etcd](https://etcd.io/) v3 (leases + watches)
 - **Metrics:** Prometheus (`prometheus/client_golang`)
-- **Email:** SMTP via `gomail`
+- **Email:** SendGrid v3 API (`sendgrid-go`); see `docs/runbooks/email-deliverability.md` in the root repo for sender authentication
 - **Config:** environment variables (`joho/godotenv` loads `.env` in dev)
 
 ---
@@ -106,7 +106,7 @@ internal/
   auth/                    # SuperTokens init + session middleware
   config/                  # env-var config loader + missing-secret warnings
   alerter/                 # channel implementations: email, sms, discord, slack
-  mailer/                  # SMTP mailer (invitation emails)
+  mailer/                  # SendGrid mailer (invitations, password reset, verification)
   monitor/                 # checkers: http.go, port.go, ping.go + SSRF validate.go
   scheduler/               # scheduler.go (embedded) + distributed.go
   coordination/            # etcd coordinator + partition manager
@@ -291,7 +291,7 @@ implementation per channel:
 
 | Channel | Target meaning | Impl |
 |---------|----------------|------|
-| `EMAIL` | recipient address | `email.go` (SMTP via gomail) |
+| `EMAIL` | recipient address | `email.go` (SendGrid API) |
 | `SMS` | phone number | `sms.go` (Twilio) |
 | `DISCORD` | webhook URL | `discord.go` |
 | `SLACK` | webhook URL | `slack.go` |

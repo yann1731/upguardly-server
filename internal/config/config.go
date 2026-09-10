@@ -2,6 +2,7 @@ package config
 
 import (
 	"log"
+	"net/mail"
 	"os"
 	"strconv"
 	"strings"
@@ -241,6 +242,11 @@ func (c *Config) warnMissingSecrets() {
 		log.Println("[INFO] config: EMAIL_ENABLED=false — all outbound email is disabled (dry-run logs only)")
 	} else if c.SendGrid.APIKey == "" {
 		log.Println("[WARN] config: SENDGRID_API_KEY is not set — email alerts and invitations will not be sent")
+	} else if _, err := mail.ParseAddress(c.SendGrid.From); err != nil || c.SendGrid.From == "" {
+		// SendGrid rejects an empty sender, and a From on a domain that isn't
+		// authenticated in SendGrid fails DMARC at the receiver ("may be
+		// spoofed"). See docs/runbooks/email-deliverability.md in the root repo.
+		log.Printf("[WARN] config: SENDGRID_FROM %q is not a valid sender address — email will fail or be flagged as spoofed", c.SendGrid.From)
 	}
 	if c.Telegram.BotToken == "" {
 		log.Println("[WARN] config: TELEGRAM_BOT_TOKEN is not set — Telegram alerts will not be sent")

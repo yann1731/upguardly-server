@@ -157,6 +157,11 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 		// Stripe webhook — public, verified by signature; stricter rate limit.
 		v1.POST("/webhooks/stripe", middleware.StrictRateLimit(), h.StripeWebhook)
 
+		// Invitation preview — public so the invite page can say which org,
+		// role and email a link is for before the invitee signs in. The token
+		// is the credential; strict limit against token guessing.
+		v1.GET("/invitations/:token", middleware.StrictRateLimit(), h.GetInvitationPreview)
+
 		protected := v1.Group("")
 		protected.Use(middleware.AuthRequired())
 		{
