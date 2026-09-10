@@ -65,14 +65,15 @@ func (a *DiscordAlerter) Send(ctx context.Context, target string, monitor *model
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		// url.Parse failures are *url.Error and embed the URL too.
+		return sanitizeTransportError("failed to create request", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send discord webhook: %w", err)
+		return sanitizeTransportError("failed to send discord webhook", err)
 	}
 	defer resp.Body.Close()
 

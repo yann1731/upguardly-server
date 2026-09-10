@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
-	"net/url"
 
 	"upguardly-backend/internal/config"
 	"upguardly-backend/internal/models"
@@ -112,29 +110,21 @@ func (a *TelegramAlerter) Send(ctx context.Context, target string, monitor *mode
 		return fmt.Errorf("failed to marshal telegram payload: %w", err)
 	}
 
-	// Named endpoint, not url: it would otherwise shadow the net/url package
-	// used below to strip this very string (it contains the token) out of
-	// transport errors.
+	// Contains the bot token: never let this string reach an error message.
 	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", a.baseURL, a.cfg.BotToken)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		// url.Parse failures are *url.Error and embed the URL too.
+		return sanitizeTransportError("failed to create request", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		// http.Client failures are *url.Error, whose Error() embeds the full
-		// request URL — and for the Bot API the URL contains the token
-		// (/bot<token>/sendMessage). This string is logged on every attempt and
-		// persisted to alert_history on the last one, so unwrap to the
-		// underlying cause rather than leaking the bot credential.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return fmt.Errorf("failed to send telegram message: %w", urlErr.Err)
-		}
-		return fmt.Errorf("failed to send telegram message: %w", err)
+		// The endpoint below contains the bot token, so this must not format
+		// the URL — see sanitizeTransportError.
+		return sanitizeTransportError("failed to send telegram message", err)
 	}
 	defer resp.Body.Close()
 

@@ -2,8 +2,12 @@ package alerter
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,5 +64,72 @@ func TestManagerSendConcurrentTargets(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&hitsB); got != perTarget {
 		t.Errorf("target B: got %d deliveries, want %d", got, perTarget)
+	}
+}
+
+// TestWebhookTransportErrorHidesTarget is the regression guard for the webhook
+// credential leak. For Discord and Slack the alert target IS the webhook URL —
+// possession of it is the capability to post to that channel — and
+// http.Client failures are *url.Error, whose Error() embeds the request URL.
+// That string is logged on every delivery attempt and written to
+// alert_history on the last one.
+func TestWebhookTransportErrorHidesTarget(t *testing.T) {
+	// A closed server guarantees a transport-level failure.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	base := srv.URL
+	srv.Close()
+
+	const secret = "SECRET-WEBHOOK-TOKEN"
+	webhook := base + "/webhooks/123456/" + secret
+
+	for _, tc := range []struct {
+		name    string
+		alerter Alerter
+	}{
+		{"discord", NewDiscordAlerter()},
+		{"slack", NewSlackAlerter()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			monitor, result := testMonitorAndResult()
+			err := tc.alerter.Send(context.Background(), webhook, monitor, result)
+			if err == nil {
+				t.Fatal("Send to closed server: want error, got nil")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error leaks the webhook credential: %q", err)
+			}
+			if strings.Contains(err.Error(), base) {
+				t.Errorf("error leaks the webhook URL: %q", err)
+			}
+		})
+	}
+}
+
+// TestSanitizeTransportErrorPreservesCause checks the sanitizer keeps the
+// underlying error wrapped — operators still need the dial/DNS/TLS cause, and
+// callers still need errors.Is/As to work through it.
+func TestSanitizeTransportErrorPreservesCause(t *testing.T) {
+	cause := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+	wrapped := &url.Error{Op: "Post", URL: "https://hooks.example.com/SECRET", Err: cause}
+
+	got := sanitizeTransportError("failed to send slack webhook", wrapped)
+	if !errors.Is(got, cause) {
+		t.Errorf("errors.Is(got, cause) = false, want true (got %q)", got)
+	}
+	if !strings.Contains(got.Error(), "connection refused") {
+		t.Errorf("error dropped the cause: %q", got)
+	}
+	if strings.Contains(got.Error(), "SECRET") {
+		t.Errorf("error leaks the URL: %q", got)
+	}
+}
+
+// TestSanitizeTransportErrorNonURLError checks a non-*url.Error passes through
+// wrapped rather than being swallowed.
+func TestSanitizeTransportErrorNonURLError(t *testing.T) {
+	cause := errors.New("context deadline exceeded")
+	got := sanitizeTransportError("failed to send", fmt.Errorf("outer: %w", cause))
+	if !errors.Is(got, cause) {
+		t.Errorf("errors.Is(got, cause) = false, want true (got %q)", got)
 	}
 }
