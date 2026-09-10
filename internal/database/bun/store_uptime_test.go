@@ -92,8 +92,11 @@ func TestComputeDailyUptimeSevenDayIsCheckWeighted(t *testing.T) {
 
 	// Check-weighted: 990/1010. Averaging the daily percentages would give 49.5.
 	want := 990.0 / 1010.0 * 100
-	if math.Abs(uptime7d-want) > 1e-9 {
-		t.Errorf("uptime7d = %v, want %v (check-weighted, not a mean of daily percentages)", uptime7d, want)
+	if uptime7d == nil {
+		t.Fatalf("uptime7d = nil, want %v", want)
+	}
+	if math.Abs(*uptime7d-want) > 1e-9 {
+		t.Errorf("uptime7d = %v, want %v (check-weighted, not a mean of daily percentages)", *uptime7d, want)
 	}
 }
 
@@ -107,8 +110,11 @@ func TestComputeDailyUptimeSevenDayWindowExcludesOlderDays(t *testing.T) {
 
 	_, uptime7d := computeDailyUptime(rows, today, 31)
 
-	if math.Abs(uptime7d-100) > 1e-9 {
-		t.Errorf("uptime7d = %v, want 100 — the 8-day-old outage is outside the window", uptime7d)
+	if uptime7d == nil {
+		t.Fatal("uptime7d = nil, want 100")
+	}
+	if math.Abs(*uptime7d-100) > 1e-9 {
+		t.Errorf("uptime7d = %v, want 100 — the 8-day-old outage is outside the window", *uptime7d)
 	}
 }
 
@@ -127,4 +133,108 @@ func TestComputeDailyUptimeHonoursCallerCalendar(t *testing.T) {
 	if got := *days[1].UptimePercent; got != 50 {
 		t.Errorf("uptimePercent = %v, want 50", got)
 	}
+}
+
+// The regression test for the reported bug: a monitor created minutes ago has
+// checks in the current hour and nothing in the rollups yet. Those raw-leg rows
+// alone must paint today and produce a real 7-day figure.
+func TestComputeDailyUptimeCountsRawOnlyDay(t *testing.T) {
+	today := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	// Three checks since creation, all healthy — nothing rolled up.
+	rows := []dailyUptimeRow{day(today, 0, "ca-east", 3, 3)}
+
+	days, uptime7d := computeDailyUptime(rows, today, 31)
+
+	if !days[30].Monitored || days[30].UptimePercent == nil {
+		t.Fatalf("today = %+v, want monitored on the raw rows alone", days[30])
+	}
+	if *days[30].UptimePercent != 100 {
+		t.Errorf("today uptime = %v, want 100", *days[30].UptimePercent)
+	}
+	if uptime7d == nil || *uptime7d != 100 {
+		t.Errorf("uptime7d = %v, want 100", uptime7d)
+	}
+}
+
+// The two legs of the uptime read (rollups for closed hours, raw for the recent
+// tail) are merged by concatenation, so the day the cutoff falls inside arrives
+// as two rows for the same (day, region). They must sum, not overwrite —
+// this is the property that makes the split safe.
+func TestComputeDailyUptimeMergesRowsFromBothLegs(t *testing.T) {
+	today := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	rows := []dailyUptimeRow{
+		day(today, 0, "ca-east", 50, 60), // rollup leg: earlier hours
+		day(today, 0, "ca-east", 10, 10), // raw leg: the not-yet-rolled-up tail
+	}
+
+	days, _ := computeDailyUptime(rows, today, 1)
+
+	want := 60.0 / 70.0 * 100
+	if days[0].UptimePercent == nil {
+		t.Fatalf("today = %+v, want monitored", days[0])
+	}
+	if got := *days[0].UptimePercent; math.Abs(got-want) > 1e-9 {
+		t.Errorf("uptimePercent = %v, want %v (both legs pooled)", got, want)
+	}
+}
+
+// nil and 0 are different answers: nil means nothing ever reported, 0 means
+// checks ran and every one failed. Collapsing them makes a brand-new monitor
+// look identical to one that is completely down.
+func TestComputeDailyUptimeSevenDayDistinguishesNoDataFromZero(t *testing.T) {
+	today := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+	if _, uptime7d := computeDailyUptime(nil, today, 31); uptime7d != nil {
+		t.Errorf("uptime7d = %v for no rows at all, want nil", *uptime7d)
+	}
+
+	// Data exists, but all of it is older than the 7-day window.
+	stale := []dailyUptimeRow{day(today, 8, "ca-east", 100, 100)}
+	if _, uptime7d := computeDailyUptime(stale, today, 31); uptime7d != nil {
+		t.Errorf("uptime7d = %v with nothing inside the window, want nil", *uptime7d)
+	}
+
+	// A real, total outage is 0 — not nil.
+	down := []dailyUptimeRow{day(today, 0, "ca-east", 0, 100)}
+	_, uptime7d := computeDailyUptime(down, today, 31)
+	if uptime7d == nil {
+		t.Fatal("uptime7d = nil for an all-down day, want 0 — a total outage is data, not a gap")
+	}
+	if *uptime7d != 0 {
+		t.Errorf("uptime7d = %v for an all-down day, want 0", *uptime7d)
+	}
+}
+
+// The cutoff is the seam between the rollup leg and the raw leg. It must land on
+// an exact hour so that `bucket < cutoff` and `checked_at >= cutoff` select
+// disjoint, gapless sets of checks.
+func TestUptimeRawCutoff(t *testing.T) {
+	since := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("truncates to the hour", func(t *testing.T) {
+		now := time.Date(2026, 8, 31, 14, 37, 42, 500, time.UTC)
+
+		got := uptimeRawCutoff(now, since)
+
+		if !got.Equal(now.Truncate(time.Hour).Add(-rawUptimeWindow)) {
+			t.Errorf("cutoff = %v, want %v", got, now.Truncate(time.Hour).Add(-rawUptimeWindow))
+		}
+		if got.Minute() != 0 || got.Second() != 0 || got.Nanosecond() != 0 {
+			t.Errorf("cutoff = %v, want an exact hour boundary — the two legs would otherwise overlap or gap", got)
+		}
+	})
+
+	// A one-day window starts after the raw window does. Unclamped, the rollup
+	// leg would get bucket >= since AND bucket < cutoff with cutoff before
+	// since: an inverted range.
+	t.Run("clamps up to since on a short window", func(t *testing.T) {
+		now := time.Date(2026, 8, 31, 6, 0, 0, 0, time.UTC)
+		todayStart := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+
+		got := uptimeRawCutoff(now, todayStart)
+
+		if !got.Equal(todayStart) {
+			t.Errorf("cutoff = %v, want it clamped to since (%v)", got, todayStart)
+		}
+	})
 }

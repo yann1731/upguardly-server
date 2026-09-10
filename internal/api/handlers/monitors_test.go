@@ -602,6 +602,33 @@ func TestGetMonitorUptime(t *testing.T) {
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
+
+	// A monitor with no checks yet must not serialize as 0% — the client would
+	// render it identically to a monitor that is completely down.
+	t.Run("no data serializes uptime7d as null", func(t *testing.T) {
+		store := &mockStore{uptimeResult: &models.MonitorUptime{}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `"uptime7d":null`)
+	})
+
+	t.Run("a real total outage serializes uptime7d as 0", func(t *testing.T) {
+		zero := 0.0
+		store := &mockStore{uptimeResult: &models.MonitorUptime{Uptime7d: &zero}}
+
+		router, h := newTestRouter(store)
+		router.GET("/v1/monitors/:id/uptime", h.GetMonitorUptime)
+
+		w := doRequest(router, "GET", "/v1/monitors/mon-1/uptime", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `"uptime7d":0`)
+	})
 }
 
 func TestGetMonitorIncidents(t *testing.T) {
