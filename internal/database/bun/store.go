@@ -54,6 +54,13 @@ func ownerPlanExpr(alias string) string {
 		           %[1]s.user_id)), 'FREE')`, alias)
 }
 
+// monitorAccessClause scopes a monitors query to the ones a user may reach:
+// their own solo monitors, and every monitor of an org they currently belong
+// to. An org monitor's creator has no standing of their own — once removed from
+// the org they lose it like any other member. Bind userId twice.
+const monitorAccessClause = `((org_id IS NULL AND user_id = ?)
+	OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?))`
+
 func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, enabled bool, regions []string) (*models.Monitor, error) {
 	var orgIDPtr *string
 	if orgId != "" {
@@ -106,13 +113,18 @@ func (s *BunStore) CountMonitorsByUser(ctx context.Context, userId string) (int,
 	return count, mapError(err)
 }
 
-func (s *BunStore) ListMonitors(ctx context.Context, userId string) ([]models.Monitor, error) {
+func (s *BunStore) ListMonitors(ctx context.Context, userId, orgId string) ([]models.Monitor, error) {
 	var monitors []Monitor
-	err := s.client.DB.NewSelect().
+	q := s.client.DB.NewSelect().
 		Model(&monitors).
 		ColumnExpr("m.*").
-		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		ColumnExpr(ownerPlanExpr("m") + " AS owner_plan")
+	if orgId == "" {
+		q = q.Where("m.user_id = ?", userId).Where("m.org_id IS NULL")
+	} else {
+		q = q.Where("m.org_id = ?", orgId)
+	}
+	err := q.
 		// A stable base order so the dashboard doesn't reshuffle between
 		// refreshes; the client applies the user's chosen sort on top.
 		Order("m.created_at ASC", "m.id ASC").
@@ -134,7 +146,7 @@ func (s *BunStore) GetMonitor(ctx context.Context, id, userId string) (*models.M
 		ColumnExpr("m.*").
 		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("id = ?", id).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -150,7 +162,7 @@ func (s *BunStore) UpdateMonitor(ctx context.Context, id, userId string, req mod
 		ColumnExpr("m.*").
 		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("id = ?", id).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -285,7 +297,7 @@ func (s *BunStore) DeleteMonitor(ctx context.Context, id, userId string) error {
 	err := s.client.DB.NewSelect().
 		Model(&m).
 		Where("id = ?", id).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return mapError(err)
@@ -303,7 +315,7 @@ func (s *BunStore) GetMonitorResults(ctx context.Context, monitorId, userId stri
 	err := s.client.DB.NewSelect().
 		Model(&m).
 		Where("id = ?", monitorId).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -356,7 +368,7 @@ func (s *BunStore) ListMonitorRegionStatus(ctx context.Context, monitorId, userI
 		ColumnExpr("m.*").
 		ColumnExpr(ownerPlanExpr("m")+" AS owner_plan").
 		Where("id = ?", monitorId).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -409,7 +421,7 @@ func (s *BunStore) ListIncidents(ctx context.Context, monitorId, userId string, 
 	err := s.client.DB.NewSelect().
 		Model(&m).
 		Where("id = ?", monitorId).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -457,7 +469,7 @@ func (s *BunStore) GetMonitorStats(ctx context.Context, monitorId, userId string
 	err := s.client.DB.NewSelect().
 		Model(&m).
 		Where("id = ?", monitorId).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -563,7 +575,7 @@ func (s *BunStore) GetMonitorUptime(ctx context.Context, monitorId, userId strin
 	err := s.client.DB.NewSelect().
 		Model(&m).
 		Where("id = ?", monitorId).
-		Where("user_id = ? OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?)", userId, userId).
+		Where(monitorAccessClause, userId, userId).
 		Scan(ctx)
 	if err != nil {
 		return nil, mapError(err)

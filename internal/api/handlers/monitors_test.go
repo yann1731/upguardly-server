@@ -46,7 +46,8 @@ func TestCreateMonitor(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 
-	t.Run("invited org member cannot create a solo monitor (403)", func(t *testing.T) {
+	t.Run("invited org member can create a personal monitor", func(t *testing.T) {
+		// Members have their own personal workspace alongside the org's.
 		store := &mockStore{
 			monitorResult:    aMonitor(),
 			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
@@ -57,8 +58,7 @@ func TestCreateMonitor(t *testing.T) {
 
 		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
 
-		assert.Equal(t, http.StatusForbidden, w.Code)
-		assert.Contains(t, w.Body.String(), "org_member_solo_forbidden")
+		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 
 	t.Run("invited org member creates org monitors on the owner's plan", func(t *testing.T) {
@@ -523,7 +523,7 @@ func TestUpdateMonitor(t *testing.T) {
 
 func TestDeleteMonitor(t *testing.T) {
 	t.Run("found returns 204", func(t *testing.T) {
-		store := &mockStore{}
+		store := &mockStore{monitorResult: aMonitor()}
 		router, h := newTestRouter(store)
 		router.DELETE("/v1/monitors/:id", h.DeleteMonitor)
 

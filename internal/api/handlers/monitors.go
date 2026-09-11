@@ -41,28 +41,33 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		return
 	}
 
-	// Resolve the plan and current monitor count for the owning scope. A monitor
-	// is either solo (no org, governed by the user's own plan) or org-owned
-	// (governed by the org owner's plan; caller must be a member).
-	var plan string
-	var count int
-	if req.OrgID == "" {
-		// Invited org members work inside their org only; their own (usually
-		// FREE) subscription doesn't open a separate solo workspace. Solo
-		// monitors from before they joined stay readable and editable.
-		acct, err := h.accountContext(c.Request.Context(), userId)
-		if err != nil {
-			log.Printf("monitors: resolve account context for user %s: %v", userId, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
-			return
-		}
-		if acct.Type == models.AccountTypeOrgMember {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error": "Organization members create monitors in their organization",
-				"code":  "org_member_solo_forbidden",
+	// Resolve the workspace the monitor is created in. The X-Workspace-Id
+	// header decides; without it, a legacy body orgId still selects the org.
+	ws := middleware.GetWorkspace(c)
+	orgID, role := ws.OrgID, ws.Role
+	if ws.Explicit {
+		if req.OrgID != "" && req.OrgID != ws.OrgID {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "orgId does not match the selected workspace",
+				"code":  "workspace_mismatch",
 			})
 			return
 		}
+	} else if req.OrgID != "" {
+		membership, err := h.store.GetMembership(c.Request.Context(), req.OrgID, userId)
+		if err != nil || membership == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this organization"})
+			return
+		}
+		orgID, role = req.OrgID, membership.Role
+	}
+
+	// Resolve the plan and current monitor count for that workspace: a solo
+	// monitor is governed by the user's own plan, an org monitor by the org
+	// owner's.
+	var plan string
+	var count int
+	if orgID == "" {
 		plan = h.planForUser(c.Request.Context(), userId)
 		n, err := h.store.CountMonitorsByUser(c.Request.Context(), userId)
 		if err != nil {
@@ -72,14 +77,14 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		}
 		count = n
 	} else {
-		if _, err := h.store.GetMembership(c.Request.Context(), req.OrgID, userId); err != nil {
-			c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this organization"})
+		if !models.RoleAtLeast(role, models.OrgRoleMember) {
+			respondOrgRoleForbidden(c)
 			return
 		}
-		plan = h.planForOrg(c.Request.Context(), req.OrgID)
-		n, err := h.store.CountMonitorsByOrg(c.Request.Context(), req.OrgID)
+		plan = h.planForOrg(c.Request.Context(), orgID)
+		n, err := h.store.CountMonitorsByOrg(c.Request.Context(), orgID)
 		if err != nil {
-			log.Printf("monitors: count monitors for org %s: %v", req.OrgID, err)
+			log.Printf("monitors: count monitors for org %s: %v", orgID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
 			return
 		}
@@ -188,9 +193,9 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		}
 	}
 
-	m, err := h.store.CreateMonitor(c.Request.Context(), userId, req.OrgID, req.Name, string(req.Type), req.Target, intervalArg, req.Timeout, degradedThresholdArg, repeatIntervalArg, repeatCountArg, *req.Enabled, req.Regions)
+	m, err := h.store.CreateMonitor(c.Request.Context(), userId, orgID, req.Name, string(req.Type), req.Target, intervalArg, req.Timeout, degradedThresholdArg, repeatIntervalArg, repeatCountArg, *req.Enabled, req.Regions)
 	if err != nil {
-		log.Printf("monitors: create monitor for user %s (org %q, type %s, regions %v): %v", userId, req.OrgID, req.Type, req.Regions, err)
+		log.Printf("monitors: create monitor for user %s (org %q, type %s, regions %v): %v", userId, orgID, req.Type, req.Regions, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})
 		return
 	}
@@ -208,6 +213,31 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 	c.JSON(http.StatusCreated, m)
 }
 
+// respondOrgRoleForbidden refuses a monitor mutation by an org VIEWER.
+func respondOrgRoleForbidden(c *gin.Context) {
+	c.JSON(http.StatusForbidden, gin.H{
+		"error": "Viewers can't change organization monitors",
+		"code":  "org_role_forbidden",
+	})
+}
+
+// requireMonitorWrite checks the caller may change the monitor (or its
+// maintenance windows and channel overrides), writing a 403 and returning
+// false if not. A solo monitor is only reachable by its owner, so it needs no
+// check; an org monitor needs MEMBER or above — VIEWERs are read-only.
+func (h *Handlers) requireMonitorWrite(c *gin.Context, m *models.Monitor, userId string) bool {
+	if m.OrgID == nil || *m.OrgID == "" {
+		return true
+	}
+	membership, err := h.store.GetMembership(c.Request.Context(), *m.OrgID, userId)
+	if err != nil || membership == nil || !models.RoleAtLeast(membership.Role, models.OrgRoleMember) {
+		respondOrgRoleForbidden(c)
+		return false
+	}
+	return true
+}
+
+// ListMonitors lists the selected workspace's monitors (X-Workspace-Id).
 func (h *Handlers) ListMonitors(c *gin.Context) {
 	userId, ok := middleware.GetUserID(c)
 	if !ok {
@@ -215,9 +245,10 @@ func (h *Handlers) ListMonitors(c *gin.Context) {
 		return
 	}
 
-	monitors, err := h.store.ListMonitors(c.Request.Context(), userId)
+	ws := middleware.GetWorkspace(c)
+	monitors, err := h.store.ListMonitors(c.Request.Context(), userId, ws.OrgID)
 	if err != nil {
-		log.Printf("monitors: list monitors for user %s: %v", userId, err)
+		log.Printf("monitors: list monitors for user %s (org %q): %v", userId, ws.OrgID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list monitors"})
 		return
 	}
@@ -268,16 +299,20 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 		return
 	}
 
+	existing, err := h.store.GetMonitor(c.Request.Context(), id, userId)
+	if err != nil || existing == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if !h.requireMonitorWrite(c, existing, userId) {
+		return
+	}
+
 	// Interval, regions, the slow-response threshold, repeat alerts, and
 	// expiry monitoring are all plan-gated, so changing any of them needs the
 	// plan of the monitor's owning scope (org owner's plan for org monitors,
 	// otherwise the user's own plan).
 	if req.Interval != nil || req.Regions != nil || req.DegradedThresholdMs != nil || req.RepeatAlertIntervalSecs != nil || req.RepeatAlertMaxCount != nil || req.CertCheckEnabled != nil || req.DomainCheckEnabled != nil {
-		existing, err := h.store.GetMonitor(c.Request.Context(), id, userId)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
-			return
-		}
 		var plan string
 		if existing.OrgID != nil && *existing.OrgID != "" {
 			plan = h.planForOrg(c.Request.Context(), *existing.OrgID)
@@ -386,12 +421,6 @@ func (h *Handlers) UpdateMonitor(c *gin.Context) {
 
 	// If target or type is being updated, re-validate for SSRF.
 	if req.Target != nil || req.Type != nil {
-		// Need the effective type to validate.
-		existing, err := h.store.GetMonitor(c.Request.Context(), id, userId)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
-			return
-		}
 		effectiveType := existing.Type
 		if req.Type != nil {
 			effectiveType = *req.Type
@@ -453,6 +482,14 @@ func (h *Handlers) DeleteMonitor(c *gin.Context) {
 	}
 
 	id := c.Param("id")
+	m, err := h.store.GetMonitor(c.Request.Context(), id, userId)
+	if err != nil || m == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if !h.requireMonitorWrite(c, m, userId) {
+		return
+	}
 	if err := h.store.DeleteMonitor(c.Request.Context(), id, userId); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
 		return

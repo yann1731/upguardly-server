@@ -18,6 +18,7 @@ type meBody struct {
 	AccountType   models.AccountType `json:"accountType"`
 	EffectivePlan string             `json:"effectivePlan"`
 	Org           *models.AccountOrg `json:"org"`
+	Workspaces    []models.Workspace `json:"workspaces"`
 }
 
 func TestGetMe(t *testing.T) {
@@ -43,6 +44,9 @@ func TestGetMe(t *testing.T) {
 		assert.Equal(t, models.AccountTypeIndividual, got.AccountType)
 		assert.Equal(t, "PRO", got.EffectivePlan)
 		assert.Nil(t, got.Org)
+		assert.Equal(t, []models.Workspace{
+			{ID: "personal", Type: models.WorkspaceTypePersonal, Plan: "PRO"},
+		}, got.Workspaces)
 	})
 
 	t.Run("user without a subscription resolves to FREE", func(t *testing.T) {
@@ -80,6 +84,20 @@ func TestGetMe(t *testing.T) {
 		assert.Equal(t, "test-org-id", got.Org.ID)
 		assert.Equal(t, "Acme", got.Org.Name)
 		assert.Equal(t, models.OrgRoleMember, got.Org.Role)
+	})
+
+	t.Run("org member gets a personal and an org workspace", func(t *testing.T) {
+		got := get(t, &mockStore{
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
+			membershipResult: aMembership(),
+			subResult:        aSubscription("ENTERPRISE"),
+		})
+
+		require.Len(t, got.Workspaces, 2)
+		assert.Equal(t, models.Workspace{ID: "personal", Type: models.WorkspaceTypePersonal, Plan: "ENTERPRISE"}, got.Workspaces[0])
+		assert.Equal(t, models.Workspace{
+			ID: "test-org-id", Type: models.WorkspaceTypeOrg, Name: "Acme", Role: models.OrgRoleMember, Plan: "ENTERPRISE",
+		}, got.Workspaces[1])
 	})
 
 	t.Run("email lookup failure returns 500", func(t *testing.T) {
