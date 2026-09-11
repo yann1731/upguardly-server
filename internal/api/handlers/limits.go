@@ -38,3 +38,37 @@ func (h *Handlers) planForOrg(ctx context.Context, orgID string) string {
 	}
 	return h.planForUser(ctx, org.OwnerID)
 }
+
+// accountContext classifies the user as an independent account, an org owner,
+// or an invited org member, and resolves the plan their workspace runs on. A
+// user belongs to at most one org (enforced on invitation accept); the owner
+// holds an OWNER membership row like any other member.
+func (h *Handlers) accountContext(ctx context.Context, userID string) (models.AccountContext, error) {
+	orgs, err := h.store.ListOrganizations(ctx, userID)
+	if err != nil {
+		return models.AccountContext{}, err
+	}
+	if len(orgs) == 0 {
+		return models.AccountContext{
+			Type:          models.AccountTypeIndividual,
+			EffectivePlan: h.planForUser(ctx, userID),
+		}, nil
+	}
+
+	org := orgs[0]
+	membership, err := h.store.GetMembership(ctx, org.ID, userID)
+	if err != nil {
+		return models.AccountContext{}, err
+	}
+	acct := models.AccountContext{
+		Org: &models.AccountOrg{ID: org.ID, Name: org.Name, Role: membership.Role},
+	}
+	if membership.Role == models.OrgRoleOwner {
+		acct.Type = models.AccountTypeOrgOwner
+		acct.EffectivePlan = h.planForUser(ctx, userID)
+	} else {
+		acct.Type = models.AccountTypeOrgMember
+		acct.EffectivePlan = h.planForUser(ctx, org.OwnerID)
+	}
+	return acct, nil
+}

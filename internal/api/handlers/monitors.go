@@ -47,6 +47,22 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 	var plan string
 	var count int
 	if req.OrgID == "" {
+		// Invited org members work inside their org only; their own (usually
+		// FREE) subscription doesn't open a separate solo workspace. Solo
+		// monitors from before they joined stay readable and editable.
+		acct, err := h.accountContext(c.Request.Context(), userId)
+		if err != nil {
+			log.Printf("monitors: resolve account context for user %s: %v", userId, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
+			return
+		}
+		if acct.Type == models.AccountTypeOrgMember {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Organization members create monitors in their organization",
+				"code":  "org_member_solo_forbidden",
+			})
+			return
+		}
 		plan = h.planForUser(c.Request.Context(), userId)
 		n, err := h.store.CountMonitorsByUser(c.Request.Context(), userId)
 		if err != nil {

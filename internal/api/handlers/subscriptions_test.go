@@ -219,6 +219,38 @@ func TestCreateCheckout(t *testing.T) {
 		// Persisting the customer ID must not grant a plan.
 		assert.Equal(t, "FREE", store.lastUpsertSub.Plan)
 	})
+
+	t.Run("invited org member is refused with 403", func(t *testing.T) {
+		store := &mockStore{
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
+			membershipResult: aMembership(),
+		}
+		fs := &fakeStripe{proPriceID: "price_pro", customerID: "cus_1", checkoutURL: "https://checkout.example/session"}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/organizations/:id/subscription", h.CreateCheckout)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription", `{"plan":"PRO"}`)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
+		assert.Contains(t, w.Body.String(), "org_managed_plan")
+		assert.False(t, fs.ensureCalled)
+	})
+
+	t.Run("org owner can still check out", func(t *testing.T) {
+		owner := aMembership()
+		owner.Role = models.OrgRoleOwner
+		store := &mockStore{
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: testUserID}},
+			membershipResult: owner,
+		}
+		fs := &fakeStripe{proPriceID: "price_pro", customerID: "cus_1", checkoutURL: "https://checkout.example/session"}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/organizations/:id/subscription", h.CreateCheckout)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription", `{"plan":"PRO"}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
 }
 
 func TestCreatePortal(t *testing.T) {
