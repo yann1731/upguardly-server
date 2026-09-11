@@ -206,24 +206,9 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		return
 	}
 
-	// An invited org member's plan is provided (and billed) by the org owner;
-	// buying a personal plan would change nothing they use. Portal and cancel
-	// stay open so a personal subscription held from before joining can still
-	// be managed.
-	acct, err := h.accountContext(c.Request.Context(), userId)
-	if err != nil {
-		log.Printf("subscription: resolve account context for user %s: %v", userId, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load account"})
-		return
-	}
-	if acct.Type == models.AccountTypeOrgMember {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Your plan is provided by your organization",
-			"code":  "org_managed_plan",
-		})
-		return
-	}
-
+	// Any user can check out, invited org members included: a subscription
+	// covers the buyer's personal workspace only, while their org workspace
+	// stays on the org owner's plan.
 	if h.stripe == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Billing not configured"})
 		return

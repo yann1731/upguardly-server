@@ -57,8 +57,11 @@ func (h *Handlers) CreateMaintenanceWindow(c *gin.Context) {
 
 	monitorID := c.Param("id")
 	m, err := h.store.GetMonitor(c.Request.Context(), monitorID, userId)
-	if err != nil {
+	if err != nil || m == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if !h.requireMonitorWrite(c, m, userId) {
 		return
 	}
 
@@ -97,8 +100,9 @@ func (h *Handlers) CreateMaintenanceWindow(c *gin.Context) {
 	c.JSON(http.StatusCreated, w)
 }
 
-// DeleteMaintenanceWindow removes a window. Always allowed for the monitor's
-// owner regardless of plan (removing suppression must never be gated).
+// DeleteMaintenanceWindow removes a window. Always allowed for anyone who can
+// edit the monitor, regardless of plan (removing suppression must never be
+// plan-gated); org VIEWERs are read-only.
 func (h *Handlers) DeleteMaintenanceWindow(c *gin.Context) {
 	userId, ok := middleware.GetUserID(c)
 	if !ok {
@@ -107,8 +111,12 @@ func (h *Handlers) DeleteMaintenanceWindow(c *gin.Context) {
 	}
 
 	monitorID := c.Param("id")
-	if _, err := h.store.GetMonitor(c.Request.Context(), monitorID, userId); err != nil {
+	m, err := h.store.GetMonitor(c.Request.Context(), monitorID, userId)
+	if err != nil || m == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if !h.requireMonitorWrite(c, m, userId) {
 		return
 	}
 

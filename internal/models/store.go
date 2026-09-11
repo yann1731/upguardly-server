@@ -27,7 +27,10 @@ type Store interface {
 	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, enabled bool, regions []string) (*Monitor, error)
 	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
 	CountMonitorsByUser(ctx context.Context, userId string) (int, error)
-	ListMonitors(ctx context.Context, userId string) ([]Monitor, error)
+	// ListMonitors lists one workspace's monitors: the user's solo monitors
+	// when orgId is empty, else the org's (membership is checked by the
+	// caller).
+	ListMonitors(ctx context.Context, userId, orgId string) ([]Monitor, error)
 	GetMonitor(ctx context.Context, id, userId string) (*Monitor, error)
 	UpdateMonitor(ctx context.Context, id, userId string, req UpdateMonitorRequest) (*Monitor, error)
 	DeleteMonitor(ctx context.Context, id, userId string) error

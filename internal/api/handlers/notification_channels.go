@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,11 +18,80 @@ import (
 // Global (account-level) notification channels. Every monitor the user owns
 // inherits them by default; per-monitor MonitorChannelSetting rows override
 // the enabled flag (see ListMonitorChannels below).
+//
+// Channels are per-user. An org's monitors alert through the org owner's
+// channels, so in an org workspace (X-Workspace-Id) these routes show the
+// owner's integrations: editable by the owner, read-only and masked for
+// everyone else.
+
+// workspaceChannelOwner resolves whose integrations the request's workspace
+// shows: the caller's own in their personal workspace, the org owner's in an
+// org workspace. It writes a response and returns false on failure.
+func (h *Handlers) workspaceChannelOwner(c *gin.Context, userId string) (string, bool) {
+	ws := middleware.GetWorkspace(c)
+	if !ws.IsOrg() {
+		return userId, true
+	}
+	org, err := h.store.GetOrganization(c.Request.Context(), ws.OrgID)
+	if err != nil || org == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Organization not found"})
+		return "", false
+	}
+	return org.OwnerID, true
+}
+
+// requireOwnChannels refuses integration edits made from an org workspace by
+// anyone but the org owner: those are the owner's personal integrations. It
+// writes a response and returns false when refused.
+func (h *Handlers) requireOwnChannels(c *gin.Context, userId string) bool {
+	ownerID, ok := h.workspaceChannelOwner(c, userId)
+	if !ok {
+		return false
+	}
+	if ownerID != userId {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "Only the organization owner can change its integrations",
+			"code":  "org_owner_only",
+		})
+		return false
+	}
+	return true
+}
+
+// maskChannelTarget hides most of an integration's destination so org members
+// can see which integrations are wired up without learning the owner's
+// address, phone number, or webhook secret (webhook URLs embed their
+// credential in the path, so only the host survives).
+func maskChannelTarget(channel models.AlertChannel, target string) string {
+	switch channel {
+	case models.AlertChannelEMAIL:
+		local, domain, ok := strings.Cut(target, "@")
+		if !ok || local == "" {
+			return "***"
+		}
+		first, _ := utf8.DecodeRuneInString(local)
+		return string(first) + "***@" + domain
+	case models.AlertChannelSMS, models.AlertChannelTELEGRAM:
+		if len(target) <= 4 {
+			return "***"
+		}
+		return "***" + target[len(target)-4:]
+	default:
+		u, err := url.Parse(target)
+		if err != nil || u.Host == "" {
+			return "***"
+		}
+		return u.Scheme + "://" + u.Host + "/***"
+	}
+}
 
 func (h *Handlers) CreateNotificationChannel(c *gin.Context) {
 	userId, ok := middleware.GetUserID(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	if !h.requireOwnChannels(c, userId) {
 		return
 	}
 
@@ -144,10 +216,21 @@ func (h *Handlers) ListNotificationChannels(c *gin.Context) {
 		return
 	}
 
-	channels, err := h.store.ListNotificationChannels(c.Request.Context(), userId)
+	ownerID, ok := h.workspaceChannelOwner(c, userId)
+	if !ok {
+		return
+	}
+
+	channels, err := h.store.ListNotificationChannels(c.Request.Context(), ownerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list notification channels"})
 		return
+	}
+
+	if ownerID != userId {
+		for i := range channels {
+			channels[i].Target = maskChannelTarget(channels[i].Channel, channels[i].Target)
+		}
 	}
 
 	c.JSON(http.StatusOK, channels)
@@ -157,6 +240,10 @@ func (h *Handlers) UpdateNotificationChannel(c *gin.Context) {
 	userId, ok := middleware.GetUserID(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if !h.requireOwnChannels(c, userId) {
 		return
 	}
 
@@ -260,6 +347,10 @@ func (h *Handlers) DeleteNotificationChannel(c *gin.Context) {
 		return
 	}
 
+	if !h.requireOwnChannels(c, userId) {
+		return
+	}
+
 	id := c.Param("id")
 
 	if err := h.store.DeleteNotificationChannel(c.Request.Context(), id, userId); err != nil {
@@ -358,9 +449,12 @@ func (h *Handlers) SetMonitorChannel(c *gin.Context) {
 		return
 	}
 
-	_, ownerID, err := h.monitorChannelOwner(c.Request.Context(), monitorID, userId)
+	monitor, ownerID, err := h.monitorChannelOwner(c.Request.Context(), monitorID, userId)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if !h.requireMonitorWrite(c, monitor, userId) {
 		return
 	}
 
@@ -391,8 +485,12 @@ func (h *Handlers) DeleteMonitorChannel(c *gin.Context) {
 	monitorID := c.Param("id")
 	channelID := c.Param("channelId")
 
-	if _, _, err := h.monitorChannelOwner(c.Request.Context(), monitorID, userId); err != nil {
+	monitor, _, err := h.monitorChannelOwner(c.Request.Context(), monitorID, userId)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Monitor not found"})
+		return
+	}
+	if !h.requireMonitorWrite(c, monitor, userId) {
 		return
 	}
 

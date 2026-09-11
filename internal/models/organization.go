@@ -91,13 +91,38 @@ type AccountOrg struct {
 	Role OrgRole `json:"role"`
 }
 
+// WorkspaceType distinguishes the caller's own workspace from an org's.
+type WorkspaceType string
+
+const (
+	WorkspaceTypePersonal WorkspaceType = "PERSONAL"
+	WorkspaceTypeOrg      WorkspaceType = "ORG"
+)
+
+// Workspace is one context a user can switch into. The personal workspace
+// holds their solo monitors and integrations on their own subscription; an org
+// workspace holds the org's monitors on the org owner's plan. ID is
+// "personal" or the org id — the value clients send as X-Workspace-Id.
+type Workspace struct {
+	ID   string        `json:"id"`
+	Type WorkspaceType `json:"type"`
+	// Name and Role are set for org workspaces only.
+	Name string  `json:"name,omitempty"`
+	Role OrgRole `json:"role,omitempty"`
+	Plan string  `json:"plan"`
+}
+
 // AccountContext is the caller's account type, org (nil for INDIVIDUAL) and
-// the plan their workspace is actually entitled to: the org owner's plan for
-// ORG_MEMBER, their own subscription's otherwise.
+// the workspaces they can switch between.
+//
+// Type and EffectivePlan predate workspaces and are kept for older clients:
+// EffectivePlan is the org owner's plan for ORG_MEMBER, the user's own
+// otherwise. New clients read the per-workspace Plan instead.
 type AccountContext struct {
 	Type          AccountType `json:"accountType"`
 	EffectivePlan string      `json:"effectivePlan"`
 	Org           *AccountOrg `json:"org"`
+	Workspaces    []Workspace `json:"workspaces"`
 }
 
 type Invitation struct {

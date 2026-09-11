@@ -40,18 +40,23 @@ func (h *Handlers) planForOrg(ctx context.Context, orgID string) string {
 }
 
 // accountContext classifies the user as an independent account, an org owner,
-// or an invited org member, and resolves the plan their workspace runs on. A
-// user belongs to at most one org (enforced on invitation accept); the owner
-// holds an OWNER membership row like any other member.
+// or an invited org member, and lists the workspaces they can switch between:
+// always their personal workspace (on their own plan), plus their org's (on
+// the org owner's plan). A user belongs to at most one org (enforced on
+// invitation accept); the owner holds an OWNER membership row like any other
+// member.
 func (h *Handlers) accountContext(ctx context.Context, userID string) (models.AccountContext, error) {
 	orgs, err := h.store.ListOrganizations(ctx, userID)
 	if err != nil {
 		return models.AccountContext{}, err
 	}
+	personalPlan := h.planForUser(ctx, userID)
+	personal := models.Workspace{ID: "personal", Type: models.WorkspaceTypePersonal, Plan: personalPlan}
 	if len(orgs) == 0 {
 		return models.AccountContext{
 			Type:          models.AccountTypeIndividual,
-			EffectivePlan: h.planForUser(ctx, userID),
+			EffectivePlan: personalPlan,
+			Workspaces:    []models.Workspace{personal},
 		}, nil
 	}
 
@@ -65,10 +70,14 @@ func (h *Handlers) accountContext(ctx context.Context, userID string) (models.Ac
 	}
 	if membership.Role == models.OrgRoleOwner {
 		acct.Type = models.AccountTypeOrgOwner
-		acct.EffectivePlan = h.planForUser(ctx, userID)
+		acct.EffectivePlan = personalPlan
 	} else {
 		acct.Type = models.AccountTypeOrgMember
 		acct.EffectivePlan = h.planForUser(ctx, org.OwnerID)
+	}
+	acct.Workspaces = []models.Workspace{
+		personal,
+		{ID: org.ID, Type: models.WorkspaceTypeOrg, Name: org.Name, Role: membership.Role, Plan: acct.EffectivePlan},
 	}
 	return acct, nil
 }

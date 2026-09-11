@@ -138,7 +138,7 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{websiteDomain},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     append([]string{"content-type"}, supertokens.GetAllCORSHeaders()...),
+		AllowHeaders:     append([]string{"content-type", middleware.WorkspaceHeader}, supertokens.GetAllCORSHeaders()...),
 		AllowCredentials: true,
 	}))
 
@@ -184,8 +184,11 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 			// Monitors
 			monitors := protected.Group("/monitors")
 			{
-				monitors.POST("", middleware.StrictRateLimit(), h.CreateMonitor)
-				monitors.GET("", h.ListMonitors)
+				// Collection routes run in the selected workspace
+				// (X-Workspace-Id); per-monitor routes authorize by the
+				// monitor itself, whatever workspace is selected.
+				monitors.POST("", middleware.StrictRateLimit(), middleware.ResolveWorkspace(store), h.CreateMonitor)
+				monitors.GET("", middleware.ResolveWorkspace(store), h.ListMonitors)
 				monitors.GET("/:id", h.GetMonitor)
 				monitors.PUT("/:id", middleware.StrictRateLimit(), h.UpdateMonitor)
 				monitors.DELETE("/:id", h.DeleteMonitor)
@@ -208,8 +211,10 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 			}
 
 			// Global (account-level) notification channels — the settings-page
-			// integrations that every monitor inherits by default.
+			// integrations that every monitor inherits by default. In an org
+			// workspace these are the org owner's (read-only to members).
 			channels := protected.Group("/notification-channels")
+			channels.Use(middleware.ResolveWorkspace(store))
 			{
 				channels.POST("", middleware.StrictRateLimit(), h.CreateNotificationChannel)
 				channels.GET("", h.ListNotificationChannels)

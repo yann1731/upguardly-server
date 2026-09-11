@@ -116,6 +116,7 @@ type mockStore struct {
 	lastRecipientChannel        string
 	lastRecipientTarget         string
 	lastAcceptMaxSeats          int
+	lastListOrgID               *string
 }
 
 // reconcileCall captures one ReconcileMonitorsToPlan invocation.
@@ -139,7 +140,8 @@ func (m *mockStore) CountMonitorsByOrg(_ context.Context, _ string) (int, error)
 func (m *mockStore) CountMonitorsByUser(_ context.Context, _ string) (int, error) {
 	return m.monitorCount, m.monitorCountErr
 }
-func (m *mockStore) ListMonitors(_ context.Context, _ string) ([]models.Monitor, error) {
+func (m *mockStore) ListMonitors(_ context.Context, _, orgId string) ([]models.Monitor, error) {
+	m.lastListOrgID = &orgId
 	return m.monitorsResult, m.monitorsErr
 }
 func (m *mockStore) GetMonitor(_ context.Context, _, _ string) (*models.Monitor, error) {
