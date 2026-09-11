@@ -46,9 +46,9 @@ selects to these IDs, so they must be set for checkout to work.
 ## 2. Create a restricted key
 
 Don't use the full-access **Secret key** — a leaked `sk_…` key can do anything on the Stripe
-account. The backend only performs four operations (create/list customers, create checkout
-sessions, create billing-portal sessions; webhooks are verified with the signing secret, not
-the API key), so create a **restricted key** scoped to exactly those.
+account. The backend only touches customers, checkout sessions, billing-portal sessions and
+subscriptions (webhooks are verified with the signing secret, not the API key), so create a
+**restricted key** scoped to exactly those.
 
 Dashboard → **Developers → API keys** → **Create restricted key**. Set these permissions and
 leave **everything else as None**:
@@ -58,6 +58,14 @@ leave **everything else as None**:
 | Customers | **Write** (Write includes Read) |
 | Checkout Sessions | **Write** |
 | Customer portal | **Write** |
+| Subscriptions | **Write** |
+
+**Subscriptions** is easy to miss and fails quietly. Reads need it
+(`GetActiveSubscription` lists the customer's subscriptions to reconcile the stored record
+against live Stripe state) and so does cancel/resume (`SetCancelAtPeriodEnd` updates the
+subscription). Without it every reconcile fails and the billing page serves a stale record
+indefinitely — which looks exactly like a sync bug, not a permissions one. Check the server log
+for a `permission`/`401` from Stripe before chasing anything else.
 
 Copy the resulting key into `STRIPE_SECRET_KEY` (`rk_test_…` for local/staging, `rk_live_…`
 for production). If you later add Stripe API calls to the backend, this key must be reissued
@@ -75,6 +83,8 @@ Dashboard → **Developers → Webhooks → Add endpoint**:
   - `customer.subscription.created`
   - `customer.subscription.updated`
   - `customer.subscription.deleted`
+  - `customer.subscription.paused`
+  - `customer.subscription.resumed`
   - `invoice.payment_failed`
 - After creating, copy the endpoint's **Signing secret** (`whsec_…`) into
   `STRIPE_WEBHOOK_SECRET`.

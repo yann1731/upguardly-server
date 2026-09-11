@@ -329,8 +329,10 @@ func (m *mockStore) UpsertSubscription(_ context.Context, params models.UpsertSu
 		return nil, m.subErr
 	}
 	// Mirror the real store: the returned record reflects the written params
-	// (syncSubscription derives the new effective plan from it).
-	return &models.Subscription{
+	// (syncSubscription derives the new effective plan from it), and a later
+	// read sees the write — which is what makes the reconcile-TTL behaviour of
+	// GetSubscription testable.
+	written := &models.Subscription{
 		ID:                   "sub-1",
 		UserID:               params.UserID,
 		Plan:                 params.Plan,
@@ -340,7 +342,10 @@ func (m *mockStore) UpsertSubscription(_ context.Context, params models.UpsertSu
 		StripePriceID:        params.StripePriceID,
 		CurrentPeriodStart:   params.CurrentPeriodStart,
 		CurrentPeriodEnd:     params.CurrentPeriodEnd,
-	}, nil
+		CancelAtPeriodEnd:    params.CancelAtPeriodEnd,
+	}
+	m.subResult = written
+	return written, nil
 }
 func (m *mockStore) ReconcileMonitorsToPlan(_ context.Context, userId, oldPlan, newPlan string) (int, error) {
 	m.lastReconcile = &reconcileCall{UserID: userId, OldPlan: oldPlan, NewPlan: newPlan}

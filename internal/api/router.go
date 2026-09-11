@@ -177,6 +177,7 @@ func NewRouter(store models.Store, websiteDomain string, m *mailer.Mailer, s *st
 			protected.POST("/subscription", middleware.StrictRateLimit(), h.CreateCheckout)
 			protected.POST("/subscription/portal", middleware.StrictRateLimit(), h.CreatePortal)
 			protected.DELETE("/subscription", middleware.StrictRateLimit(), h.CancelSubscription)
+			protected.POST("/subscription/resume", middleware.StrictRateLimit(), h.ResumeSubscription)
 
 			// Invitation accept — requires auth (to know which user is accepting).
 			protected.POST("/invitations/:token/accept", middleware.StrictRateLimit(), h.AcceptInvitation)

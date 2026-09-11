@@ -86,15 +86,38 @@ func TestGetSubscription(t *testing.T) {
 		doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
 		require.Equal(t, 1, fs.getActiveSubCalls)
 
-		// Within the TTL a read would normally skip Stripe, but cancel must
-		// force the next read to reconcile (cancelAtPeriodEnd only comes from
-		// live Stripe state).
+		// Within the TTL a read would normally skip Stripe; cancel clears the
+		// entry so the next read sees live state immediately.
 		doRequest(router, "DELETE", "/v1/organizations/test-org-id/subscription", "")
 		w := doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, 2, fs.getActiveSubCalls, "read after cancel must reconcile again")
 		assert.Contains(t, w.Body.String(), `"cancelAtPeriodEnd":true`)
+	})
+
+	t.Run("a scheduled cancellation survives reads served from the record", func(t *testing.T) {
+		// The regression this guards: cancelAtPeriodEnd used to be stitched onto
+		// the response only on the reconcile path, so every read inside
+		// reconcileTTL reported false on a plan whose status is legitimately
+		// still ACTIVE — and the billing page announced a renewal that was not
+		// coming. Only the first of these reads reconciles; all of them must
+		// agree.
+		sub := aSubscription("PRO")
+		cust := "cus_1"
+		sub.StripeCustomerID = &cust
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{proPriceID: "price_pro", activeSub: aStripeSub("price_pro", true)}
+		router, h := newOrgRouter(store, fs)
+		router.GET("/v1/organizations/:id/subscription", h.GetSubscription)
+
+		for i := 0; i < 3; i++ {
+			w := doRequest(router, "GET", "/v1/organizations/test-org-id/subscription", "")
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), `"cancelAtPeriodEnd":true`, "read %d", i+1)
+			assert.Contains(t, w.Body.String(), `"status":"ACTIVE"`, "read %d: grace is preserved", i+1)
+		}
+		require.Equal(t, 1, fs.getActiveSubCalls, "only the first read should hit Stripe")
 	})
 }
 
@@ -134,6 +157,86 @@ func TestCancelSubscription(t *testing.T) {
 		require.NotNil(t, fs.lastCancelAtPeriodEnd)
 		assert.True(t, *fs.lastCancelAtPeriodEnd)
 		assert.Contains(t, w.Body.String(), `"cancelAtPeriodEnd":true`)
+	})
+
+	t.Run("persists the flag instead of only reporting it", func(t *testing.T) {
+		// Stripe is the source of truth, but the record has to carry the flag
+		// too: reads inside reconcileTTL never ask Stripe.
+		sub := aSubscription("PRO")
+		subID := "sub_1"
+		sub.StripeSubscriptionID = &subID
+		store := &mockStore{subResult: sub}
+		router, h := newOrgRouter(store, &fakeStripe{})
+		router.DELETE("/v1/organizations/:id/subscription", h.CancelSubscription)
+
+		doRequest(router, "DELETE", "/v1/organizations/test-org-id/subscription", "")
+
+		require.NotNil(t, store.lastUpsertSub)
+		assert.True(t, store.lastUpsertSub.CancelAtPeriodEnd)
+		// The plan keeps running until the period ends, so nothing else moves.
+		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
+		assert.Equal(t, "ACTIVE", store.lastUpsertSub.Status)
+		assert.Nil(t, store.lastReconcile, "entitlement is unchanged, so monitors must not be snapped")
+	})
+}
+
+func TestResumeSubscription(t *testing.T) {
+	t.Run("billing not configured returns 503", func(t *testing.T) {
+		store := &mockStore{}
+		router, h := newOrgRouter(store, nil)
+		router.POST("/v1/organizations/:id/subscription/resume", h.ResumeSubscription)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription/resume", "")
+
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	})
+
+	t.Run("no billing subscription returns 404", func(t *testing.T) {
+		store := &mockStore{subResult: aSubscription("PRO")} // no StripeSubscriptionID
+		router, h := newOrgRouter(store, &fakeStripe{})
+		router.POST("/v1/organizations/:id/subscription/resume", h.ResumeSubscription)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription/resume", "")
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("an already-ended subscription returns 409", func(t *testing.T) {
+		// The period lapsed, so there is no live subscription to un-schedule —
+		// the user has to check out again.
+		sub := aSubscription("PRO")
+		subID := "sub_1"
+		sub.StripeSubscriptionID = &subID
+		sub.Status = "CANCELED"
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/organizations/:id/subscription/resume", h.ResumeSubscription)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription/resume", "")
+
+		assert.Equal(t, http.StatusConflict, w.Code)
+		assert.Nil(t, fs.lastCancelAtPeriodEnd, "Stripe must not be called")
+	})
+
+	t.Run("clears the scheduled cancellation", func(t *testing.T) {
+		sub := aSubscription("PRO")
+		subID := "sub_1"
+		sub.StripeSubscriptionID = &subID
+		sub.CancelAtPeriodEnd = true
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/organizations/:id/subscription/resume", h.ResumeSubscription)
+
+		w := doRequest(router, "POST", "/v1/organizations/test-org-id/subscription/resume", "")
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, fs.lastCancelAtPeriodEnd)
+		assert.False(t, *fs.lastCancelAtPeriodEnd)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.False(t, store.lastUpsertSub.CancelAtPeriodEnd)
+		assert.Contains(t, w.Body.String(), `"cancelAtPeriodEnd":false`)
 	})
 }
 
@@ -334,6 +437,31 @@ func TestStripeWebhook(t *testing.T) {
 		assert.Equal(t, testUserID, store.lastUpsertSub.UserID)
 	})
 
+	t.Run("subscription.updated records a scheduled cancellation", func(t *testing.T) {
+		// Cancelling — in-app or from the Stripe portal — arrives as an updated
+		// event with status still "active" and cancel_at_period_end true. Status
+		// alone cannot express it, so dropping the flag here left the record
+		// indistinguishable from a renewing plan.
+		store := &mockStore{}
+		fs := &fakeStripe{
+			proPriceID: "price_pro",
+			event: stripe.Event{
+				Type: "customer.subscription.updated",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSONCanceling("price_pro"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		w := doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, store.lastUpsertSub)
+		assert.True(t, store.lastUpsertSub.CancelAtPeriodEnd)
+		assert.Equal(t, "ACTIVE", store.lastUpsertSub.Status, "grace runs to the period end")
+		assert.Equal(t, "PRO", store.lastUpsertSub.Plan)
+	})
+
 	t.Run("unpaid status is stored as CANCELED, never ACTIVE", func(t *testing.T) {
 		// "unpaid" means payment retries are exhausted; Stripe never emits a
 		// deleted event for it, so this webhook is the only signal. Mapping
@@ -373,6 +501,28 @@ func TestStripeWebhook(t *testing.T) {
 		require.NotNil(t, store.lastUpsertSub)
 		assert.Equal(t, "FREE", store.lastUpsertSub.Plan)
 		assert.Equal(t, "CANCELED", store.lastUpsertSub.Status)
+	})
+
+	t.Run("subscription.deleted clears the scheduled cancellation", func(t *testing.T) {
+		// Once the period has actually ended the cancellation is done, not
+		// pending — leaving the flag set would keep the billing page announcing
+		// a future cancel date on a FREE plan.
+		sub := aSubscription("PRO")
+		sub.CancelAtPeriodEnd = true
+		store := &mockStore{subResult: sub}
+		fs := &fakeStripe{
+			event: stripe.Event{
+				Type: "customer.subscription.deleted",
+				Data: &stripe.EventData{Raw: json.RawMessage(subscriptionEventJSON("price_pro"))},
+			},
+		}
+		router, h := newOrgRouter(store, fs)
+		router.POST("/v1/webhooks/stripe", h.StripeWebhook)
+
+		doRequest(router, "POST", "/v1/webhooks/stripe", `{}`)
+
+		require.NotNil(t, store.lastUpsertSub)
+		assert.False(t, store.lastUpsertSub.CancelAtPeriodEnd)
 	})
 
 	t.Run("subscription.deleted reconciles monitors to FREE", func(t *testing.T) {
@@ -593,6 +743,22 @@ func TestStripeWebhook(t *testing.T) {
 // user_id metadata and a single line item with the given price ID.
 func subscriptionEventJSON(priceID string) string {
 	return subscriptionEventJSONWithStatus(priceID, "active")
+}
+
+// subscriptionEventJSONCanceling is what Stripe sends when a cancellation is
+// scheduled: the subscription is still active, with cancel_at_period_end set.
+func subscriptionEventJSONCanceling(priceID string) string {
+	return `{
+		"id": "sub_1",
+		"status": "active",
+		"cancel_at_period_end": true,
+		"customer": {"id": "cus_1", "metadata": {"user_id": "test-user-id"}},
+		"items": {"data": [{
+			"price": {"id": "` + priceID + `"},
+			"current_period_start": 1700000000,
+			"current_period_end": 1702592000
+		}]}
+	}`
 }
 
 func subscriptionEventJSONWithStatus(priceID, status string) string {

@@ -71,8 +71,11 @@ type Subscription struct {
 	StripePriceID        *string    `bun:"stripe_price_id"`
 	CurrentPeriodStart   *time.Time `bun:"current_period_start"`
 	CurrentPeriodEnd     *time.Time `bun:"current_period_end"`
-	CreatedAt            time.Time  `bun:"created_at,nullzero,notnull,default:current_timestamp"`
-	UpdatedAt            time.Time  `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	// CancelAtPeriodEnd mirrors Stripe's flag: the subscription is still active
+	// (status stays ACTIVE, entitlement intact) but will not renew.
+	CancelAtPeriodEnd bool      `bun:"cancel_at_period_end,notnull"`
+	CreatedAt         time.Time `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt         time.Time `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
 }
 
 type Monitor struct {
