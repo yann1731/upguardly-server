@@ -71,6 +71,35 @@ type OrgWithSeats struct {
 	Seats OrgSeats `json:"seats"`
 }
 
+// AccountType distinguishes how a user relates to billing. An INDIVIDUAL has
+// no org and is billed on their own subscription. An ORG_OWNER created an org
+// (on their own ENTERPRISE subscription). An ORG_MEMBER joined someone else's
+// org by invitation: their entitlements come from the org owner's plan, not
+// their own subscription, and they don't manage billing.
+type AccountType string
+
+const (
+	AccountTypeIndividual AccountType = "INDIVIDUAL"
+	AccountTypeOrgOwner   AccountType = "ORG_OWNER"
+	AccountTypeOrgMember  AccountType = "ORG_MEMBER"
+)
+
+// AccountOrg is the caller's organization as seen from GET /me.
+type AccountOrg struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	Role OrgRole `json:"role"`
+}
+
+// AccountContext is the caller's account type, org (nil for INDIVIDUAL) and
+// the plan their workspace is actually entitled to: the org owner's plan for
+// ORG_MEMBER, their own subscription's otherwise.
+type AccountContext struct {
+	Type          AccountType `json:"accountType"`
+	EffectivePlan string      `json:"effectivePlan"`
+	Org           *AccountOrg `json:"org"`
+}
+
 type Invitation struct {
 	ID        string    `json:"id"`
 	OrgID     string    `json:"orgId"`

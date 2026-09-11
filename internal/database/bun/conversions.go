@@ -8,6 +8,7 @@ func (m *Monitor) toModel() models.Monitor {
 	return models.Monitor{
 		ID:                        m.ID,
 		OrgID:                     m.OrgID,
+		Plan:                      m.OwnerPlan,
 		Name:                      m.Name,
 		Type:                      models.MonitorType(m.Type),
 		Target:                    m.Target,

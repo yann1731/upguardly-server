@@ -46,6 +46,55 @@ func TestCreateMonitor(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, w.Code)
 	})
 
+	t.Run("invited org member cannot create a solo monitor (403)", func(t *testing.T) {
+		store := &mockStore{
+			monitorResult:    aMonitor(),
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
+			membershipResult: aMembership(),
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
+		assert.Contains(t, w.Body.String(), "org_member_solo_forbidden")
+	})
+
+	t.Run("invited org member creates org monitors on the owner's plan", func(t *testing.T) {
+		// FREE would cap at 5; the org owner's ENTERPRISE plan allows 6+.
+		store := &mockStore{
+			monitorResult:    aMonitor(),
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
+			orgResult:        &models.Organization{ID: "test-org-id", OwnerID: "owner-id"},
+			membershipResult: aMembership(),
+			subResult:        aSubscription("ENTERPRISE"),
+			monitorCount:     6,
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+	})
+
+	t.Run("org owner can still create a solo monitor", func(t *testing.T) {
+		owner := aMembership()
+		owner.Role = models.OrgRoleOwner
+		store := &mockStore{
+			monitorResult:    aMonitor(),
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: testUserID}},
+			membershipResult: owner,
+		}
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", h.CreateMonitor)
+
+		w := doRequest(router, "POST", "/v1/monitors", `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`)
+
+		assert.Equal(t, http.StatusCreated, w.Code)
+	})
+
 	t.Run("invalid type returns 400", func(t *testing.T) {
 		store := &mockStore{}
 		router, h := newTestRouter(store)

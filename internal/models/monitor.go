@@ -55,8 +55,13 @@ func EffectiveDegradedThreshold(raw *int, t MonitorType) int {
 }
 
 type Monitor struct {
-	ID     string      `json:"id"`
-	OrgID  *string     `json:"orgId,omitempty"`
+	ID    string  `json:"id"`
+	OrgID *string `json:"orgId,omitempty"`
+	// Plan is the effective plan governing this monitor: the org owner's for an
+	// org monitor, the creator's for a solo one. Clients gate per-monitor
+	// features on it rather than on the viewer's own subscription, which for an
+	// invited org member is not the plan the monitor runs on.
+	Plan   string      `json:"plan"`
 	Name   string      `json:"name"`
 	Type   MonitorType `json:"type"`
 	Target string      `json:"target"`
