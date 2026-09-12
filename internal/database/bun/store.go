@@ -1408,20 +1408,30 @@ func (s *BunStore) UpsertSubscription(ctx context.Context, params models.UpsertS
 		StripePriceID:        params.StripePriceID,
 		CurrentPeriodStart:   params.CurrentPeriodStart,
 		CurrentPeriodEnd:     params.CurrentPeriodEnd,
+		CancelAtPeriodEnd:    params.CancelAtPeriodEnd,
 		UpdatedAt:            time.Now(),
 	}
 
+	// The nullable Stripe columns COALESCE against the existing row so a caller
+	// that only knows part of the picture doesn't erase the rest. Several do:
+	// handleSubscriptionDeleted and handlePaymentFailed pass nothing but
+	// user/plan/status, and with a plain EXCLUDED assignment that NULLed the
+	// customer and subscription IDs — which then 404s the portal and cancel
+	// endpoints and forces reconcile back into a customer search — along with
+	// both period dates. plan, status and cancel_at_period_end are always
+	// supplied deliberately, so those overwrite.
 	err := s.client.DB.NewInsert().
 		Model(sub).
 		ExcludeColumn("created_at").
 		On("CONFLICT (user_id) DO UPDATE").
 		Set("plan = EXCLUDED.plan").
 		Set("status = EXCLUDED.status").
-		Set("stripe_customer_id = EXCLUDED.stripe_customer_id").
-		Set("stripe_subscription_id = EXCLUDED.stripe_subscription_id").
-		Set("stripe_price_id = EXCLUDED.stripe_price_id").
-		Set("current_period_start = EXCLUDED.current_period_start").
-		Set("current_period_end = EXCLUDED.current_period_end").
+		Set(`stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, "s"."stripe_customer_id")`).
+		Set(`stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, "s"."stripe_subscription_id")`).
+		Set(`stripe_price_id = COALESCE(EXCLUDED.stripe_price_id, "s"."stripe_price_id")`).
+		Set(`current_period_start = COALESCE(EXCLUDED.current_period_start, "s"."current_period_start")`).
+		Set(`current_period_end = COALESCE(EXCLUDED.current_period_end, "s"."current_period_end")`).
+		Set("cancel_at_period_end = EXCLUDED.cancel_at_period_end").
 		Set("updated_at = NOW()").
 		Returning("*").
 		Scan(ctx)

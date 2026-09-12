@@ -110,6 +110,7 @@ func (s *Subscription) toModel() models.Subscription {
 		StripePriceID:        s.StripePriceID,
 		CurrentPeriodStart:   s.CurrentPeriodStart,
 		CurrentPeriodEnd:     s.CurrentPeriodEnd,
+		CancelAtPeriodEnd:    s.CancelAtPeriodEnd,
 		CreatedAt:            s.CreatedAt,
 		UpdatedAt:            s.UpdatedAt,
 	}

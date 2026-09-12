@@ -147,7 +147,6 @@ func (h *Handlers) reconcileSubscription(c *gin.Context, userID string, dbSub *m
 	if err != nil {
 		return nil
 	}
-	updated.CancelAtPeriodEnd = stripeSub.CancelAtPeriodEnd
 	return updated
 }
 
@@ -196,6 +195,11 @@ func (h *Handlers) upsertParamsFromStripe(userID string, s *stripe.Subscription)
 		end := time.Unix(item.CurrentPeriodEnd, 0)
 		params.CurrentPeriodEnd = &end
 	}
+	// A scheduled cancellation leaves the subscription `active` at Stripe, so
+	// status alone can't express it. Carrying the flag here is what lets the
+	// customer.subscription.updated webhook record a cancellation — including
+	// one made in the Stripe portal — rather than only a live reconcile.
+	params.CancelAtPeriodEnd = s.CancelAtPeriodEnd
 	return params, nil
 }
 
@@ -267,15 +271,19 @@ func (h *Handlers) CreateCheckout(c *gin.Context) {
 		// Persist the ID immediately (not just via webhook) so later lookups
 		// and reconciles skip the search — Stripe search is eventually
 		// consistent, so a re-search right after creation can miss.
-		plan, status := "FREE", "ACTIVE"
+		// plan/status/cancelAtPeriodEnd are carried forward, not defaulted: this
+		// write only means to add the customer ID, and those three columns
+		// overwrite unconditionally in UpsertSubscription.
+		plan, status, cancelAtPeriodEnd := "FREE", "ACTIVE", false
 		if subErr == nil {
-			plan, status = dbSub.Plan, dbSub.Status
+			plan, status, cancelAtPeriodEnd = dbSub.Plan, dbSub.Status, dbSub.CancelAtPeriodEnd
 		}
 		if _, upErr := h.store.UpsertSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
-			UserID:           userId,
-			Plan:             plan,
-			Status:           status,
-			StripeCustomerID: &customerID,
+			UserID:            userId,
+			Plan:              plan,
+			Status:            status,
+			StripeCustomerID:  &customerID,
+			CancelAtPeriodEnd: cancelAtPeriodEnd,
 		}); upErr != nil {
 			log.Printf("checkout: failed to persist stripe customer id for user %s: %v", userId, upErr)
 		}
@@ -338,6 +346,12 @@ func (h *Handlers) CreatePortal(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create portal session"})
 		return
 	}
+
+	// The user is about to change their plan in the portal and will be returned
+	// straight to the billing page. Drop the TTL so that read reconciles rather
+	// than serving a row from before the visit — otherwise a cancellation made
+	// in the portal is invisible for up to a minute.
+	h.forgetReconcile(userId)
 
 	c.JSON(http.StatusOK, gin.H{"url": redirectURL})
 }
@@ -546,11 +560,78 @@ func (h *Handlers) CancelSubscription(c *gin.Context) {
 		return
 	}
 
-	// The cancelAtPeriodEnd flag is only derived from live Stripe state, so
-	// the next GetSubscription must reconcile to show it.
+	h.respondWithCancelAtPeriodEnd(c, userId, sub, true)
+}
+
+// ResumeSubscription clears a scheduled cancellation so the plan renews again.
+// Only possible while the period is still running: once it lapses the
+// subscription is gone at Stripe and the user has to check out afresh.
+func (h *Handlers) ResumeSubscription(c *gin.Context) {
+	userId, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	if h.stripe == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Billing not configured"})
+		return
+	}
+
+	sub, err := h.store.GetSubscriptionByUser(c.Request.Context(), userId)
+	if err != nil || sub.StripeSubscriptionID == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No active billing subscription"})
+		return
+	}
+
+	// No entitlement means there is nothing live to un-schedule: the period
+	// already ended, or the first payment never completed (both stored as
+	// CANCELED). Stripe would reject the update anyway.
+	if effectivePlan(sub) == "FREE" {
+		c.JSON(http.StatusConflict, gin.H{"error": "Subscription has already ended; start a new plan instead"})
+		return
+	}
+
+	if err := h.stripe.SetCancelAtPeriodEnd(*sub.StripeSubscriptionID, false); err != nil {
+		log.Printf("resume subscription for user %s: %v", userId, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resume subscription"})
+		return
+	}
+
+	h.respondWithCancelAtPeriodEnd(c, userId, sub, false)
+}
+
+// respondWithCancelAtPeriodEnd persists the new flag against the record we just
+// read and responds with it. Writing through matters: the flag used to be
+// derived from live Stripe state only, so the answer depended on whether the
+// next read happened to fall outside reconcileTTL — within it the billing page
+// saw cancelAtPeriodEnd=false on a still-ACTIVE plan and announced a renewal
+// that was not coming. forgetReconcile stays as a backstop, so a failed write
+// still self-heals on the next read.
+func (h *Handlers) respondWithCancelAtPeriodEnd(c *gin.Context, userId string, sub *models.Subscription, cancelAtPeriodEnd bool) {
 	h.forgetReconcile(userId)
 
-	c.JSON(http.StatusOK, gin.H{"status": sub.Status, "cancelAtPeriodEnd": true})
+	updated, err := h.syncSubscription(c.Request.Context(), models.UpsertSubscriptionParams{
+		UserID:               userId,
+		Plan:                 sub.Plan,
+		Status:               sub.Status,
+		StripeCustomerID:     sub.StripeCustomerID,
+		StripeSubscriptionID: sub.StripeSubscriptionID,
+		StripePriceID:        sub.StripePriceID,
+		CurrentPeriodStart:   sub.CurrentPeriodStart,
+		CurrentPeriodEnd:     sub.CurrentPeriodEnd,
+		CancelAtPeriodEnd:    cancelAtPeriodEnd,
+	})
+	if err != nil {
+		// Stripe already has the change, so this is not a failure the caller can
+		// act on — report the intended state and let the next read reconcile.
+		log.Printf("subscription: failed to persist cancelAtPeriodEnd=%t for user %s: %v", cancelAtPeriodEnd, userId, err)
+		sub.CancelAtPeriodEnd = cancelAtPeriodEnd
+		c.JSON(http.StatusOK, sub)
+		return
+	}
+
+	c.JSON(http.StatusOK, updated)
 }
 
 // mapStripeStatus maps a Stripe subscription status to the internal enum.

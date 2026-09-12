@@ -160,8 +160,11 @@ type Subscription struct {
 	StripePriceID        *string    `json:"stripePriceId,omitempty"`
 	CurrentPeriodStart   *time.Time `json:"currentPeriodStart,omitempty"`
 	CurrentPeriodEnd     *time.Time `json:"currentPeriodEnd,omitempty"`
-	// CancelAtPeriodEnd reflects Stripe's flag; it is derived from the live
-	// Stripe subscription during reconciliation and not persisted in the DB.
+	// CancelAtPeriodEnd reflects Stripe's flag: the plan is scheduled to lapse
+	// at CurrentPeriodEnd instead of renewing. Status stays ACTIVE until it
+	// does — the entitlement is unchanged — so this is the only signal that no
+	// renewal is coming. Persisted, so every read reports it and not just the
+	// ones that happen to reconcile against live Stripe state.
 	CancelAtPeriodEnd bool      `json:"cancelAtPeriodEnd"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
@@ -208,4 +211,5 @@ type UpsertSubscriptionParams struct {
 	StripePriceID        *string
 	CurrentPeriodStart   *time.Time
 	CurrentPeriodEnd     *time.Time
+	CancelAtPeriodEnd    bool
 }
