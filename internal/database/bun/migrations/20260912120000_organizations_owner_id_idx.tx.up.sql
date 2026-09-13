@@ -1,0 +1,18 @@
+-- Index organizations.owner_id.
+--
+-- The monitor quota is now one pool per billing owner — their personal
+-- monitors plus every monitor in an org they own — expressed as
+-- bun.billingScopeClause:
+--
+--   ((user_id = ? AND org_id IS NULL)
+--    OR org_id IN (SELECT id FROM organizations WHERE owner_id = ?))
+--
+-- That subquery previously ran only on a subscription change
+-- (ReconcileMonitorsToPlan) and could afford a seq scan. It now runs on every
+-- GET /me and inside every monitor create, so give it an index. The table is
+-- small, but this is on request paths.
+--
+-- Not unique: nothing in the schema stops a user owning several organizations
+-- (only organization_members.user_id is unique, which caps membership at one),
+-- and the clause is written to pool them all.
+CREATE INDEX IF NOT EXISTS "organizations_owner_id_idx" ON "organizations" ("owner_id");

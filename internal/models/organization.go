@@ -110,6 +110,15 @@ type Workspace struct {
 	Name string  `json:"name,omitempty"`
 	Role OrgRole `json:"role,omitempty"`
 	Plan string  `json:"plan"`
+	// MonitorsUsed and MaxMonitors report the workspace's monitor quota so the
+	// dashboard can render a counter. Both are figures for the *billing owner*
+	// — the user themselves for a personal workspace, the org owner for an
+	// org's — and the cap is one pool covering their personal monitors and
+	// every monitor in an org they own. So an org owner sees the same numbers
+	// in both of their workspaces. MaxMonitors uses the Unlimited (-1)
+	// sentinel, like OrgSeats.
+	MonitorsUsed int `json:"monitorsUsed"`
+	MaxMonitors  int `json:"maxMonitors"`
 }
 
 // AccountContext is the caller's account type, org (nil for INDIVIDUAL) and

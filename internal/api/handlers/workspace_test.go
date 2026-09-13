@@ -105,6 +105,9 @@ func TestWorkspaceCreateMonitor(t *testing.T) {
 	})
 
 	t.Run("VIEWER can't create in the org workspace", func(t *testing.T) {
+		// Deliberately no orgResult: the role check has to come before the
+		// billing lookup, so refusing a viewer never depends on the org
+		// loading. With the order reversed this returns 500.
 		store := &mockStore{monitorResult: anOrgMonitor(), membershipResult: aMembershipWithRole(models.OrgRoleViewer)}
 		w := create(t, store, body, testOrgID)
 
@@ -121,7 +124,7 @@ func TestWorkspaceCreateMonitor(t *testing.T) {
 	})
 
 	t.Run("a body orgId matching the workspace is accepted", func(t *testing.T) {
-		store := &mockStore{monitorResult: anOrgMonitor(), membershipResult: aMembership()}
+		store := &mockStore{monitorResult: anOrgMonitor(), membershipResult: aMembership(), orgResult: anOrg()}
 		w := create(t, store, `{"orgId":"test-org-id","name":"x","type":"HTTP","target":"http://93.184.216.34"}`, testOrgID)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
@@ -295,5 +298,95 @@ func TestWorkspaceNotificationChannels(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, w.Code, tc.method)
 			assert.Contains(t, w.Body.String(), "org_owner_only", tc.method)
 		}
+	})
+}
+
+// TestMonitorQuotaIsPooled covers the rule that a plan's MaxMonitors is one
+// budget per billing owner, spanning their personal workspace and every org
+// they own. Before this, each workspace carried its own budget and an
+// ENTERPRISE owner could run 200 personal monitors *and* 200 org ones.
+func TestMonitorQuotaIsPooled(t *testing.T) {
+	const body = `{"name":"x","type":"HTTP","target":"http://93.184.216.34"}`
+	create := func(t *testing.T, store *mockStore, workspace string) *httptest.ResponseRecorder {
+		t.Helper()
+		router, h := newTestRouter(store)
+		router.POST("/v1/monitors", middleware.ResolveWorkspace(store), h.CreateMonitor)
+		return doWorkspaceRequest(router, "POST", "/v1/monitors", body, workspace)
+	}
+
+	// An org owner on ENTERPRISE whose pool is already full, whichever
+	// workspace those 200 monitors happen to sit in.
+	fullOwner := func() *mockStore {
+		return &mockStore{
+			monitorResult:    anOrgMonitor(),
+			orgResult:        anOrg(),
+			orgsResult:       []models.Organization{*anOrg()},
+			membershipResult: aMembershipWithRole(models.OrgRoleOwner),
+			subResult:        aSubscription("ENTERPRISE"),
+			monitorCount:     200,
+		}
+	}
+
+	t.Run("a full pool blocks a personal create", func(t *testing.T) {
+		store := fullOwner()
+		w := create(t, store, middleware.PersonalWorkspaceID)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+		assert.Contains(t, w.Body.String(), "shared across your personal workspace")
+		assert.Equal(t, testUserID, store.lastCreateParams.BillingOwnerID)
+	})
+
+	t.Run("a full pool blocks an org create", func(t *testing.T) {
+		store := fullOwner()
+		w := create(t, store, testOrgID)
+
+		assert.Equal(t, http.StatusPaymentRequired, w.Code)
+		assert.Equal(t, testUserID, store.lastCreateParams.BillingOwnerID)
+	})
+
+	t.Run("an org create is billed to the org owner, not the creator", func(t *testing.T) {
+		// An invited MEMBER on FREE creating in the org: the cap that applies
+		// is the owner's ENTERPRISE 200, and the count is the owner's pool.
+		store := &mockStore{
+			monitorResult:    anOrgMonitor(),
+			orgResult:        &models.Organization{ID: testOrgID, OwnerID: "owner-id"},
+			membershipResult: aMembership(),
+			subResult:        aSubscription("ENTERPRISE"),
+		}
+		w := create(t, store, testOrgID)
+
+		require.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, "owner-id", store.lastCreateParams.BillingOwnerID)
+		assert.Equal(t, 200, store.lastCreateParams.MaxMonitors)
+		// The creator is still recorded on the row.
+		assert.Equal(t, testUserID, store.lastCreateParams.UserID)
+	})
+
+	t.Run("a member's personal create is billed to themselves", func(t *testing.T) {
+		store := &mockStore{
+			monitorResult:    aMonitor(),
+			orgResult:        &models.Organization{ID: testOrgID, OwnerID: "owner-id"},
+			membershipResult: aMembership(),
+		}
+		w := create(t, store, middleware.PersonalWorkspaceID)
+
+		require.Equal(t, http.StatusCreated, w.Code)
+		assert.Equal(t, testUserID, store.lastCreateParams.BillingOwnerID)
+		assert.Equal(t, 5, store.lastCreateParams.MaxMonitors)
+	})
+
+	t.Run("an org that won't load returns 500 rather than free-tier limits", func(t *testing.T) {
+		// Membership was already proven by ResolveWorkspace, so an org that
+		// can't be read means the database is unwell. Silently applying FREE
+		// limits — the old behavior — would be worse.
+		store := &mockStore{
+			monitorResult:    anOrgMonitor(),
+			membershipResult: aMembership(),
+			subResult:        aSubscription("ENTERPRISE"),
+		}
+		w := create(t, store, testOrgID)
+
+		assert.Equal(t, http.StatusInternalServerError, w.Code)
+		assert.Nil(t, store.lastCreateParams)
 	})
 }

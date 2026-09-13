@@ -45,7 +45,7 @@ func TestGetMe(t *testing.T) {
 		assert.Equal(t, "PRO", got.EffectivePlan)
 		assert.Nil(t, got.Org)
 		assert.Equal(t, []models.Workspace{
-			{ID: "personal", Type: models.WorkspaceTypePersonal, Plan: "PRO"},
+			{ID: "personal", Type: models.WorkspaceTypePersonal, Plan: "PRO", MaxMonitors: 20},
 		}, got.Workspaces)
 	})
 
@@ -87,17 +87,54 @@ func TestGetMe(t *testing.T) {
 	})
 
 	t.Run("org member gets a personal and an org workspace", func(t *testing.T) {
+		// The member and the org owner are different billing subjects, so the
+		// two workspaces report different pools: the member's own monitors on
+		// personal, the owner's on the org.
 		got := get(t, &mockStore{
-			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
-			membershipResult: aMembership(),
-			subResult:        aSubscription("ENTERPRISE"),
+			orgsResult:           []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: "owner-id"}},
+			membershipResult:     aMembership(),
+			subResult:            aSubscription("ENTERPRISE"),
+			monitorCountsByOwner: map[string]int{testUserID: 2, "owner-id": 47},
 		})
 
 		require.Len(t, got.Workspaces, 2)
-		assert.Equal(t, models.Workspace{ID: "personal", Type: models.WorkspaceTypePersonal, Plan: "ENTERPRISE"}, got.Workspaces[0])
+		assert.Equal(t, models.Workspace{
+			ID: "personal", Type: models.WorkspaceTypePersonal, Plan: "ENTERPRISE", MonitorsUsed: 2, MaxMonitors: 200,
+		}, got.Workspaces[0])
 		assert.Equal(t, models.Workspace{
 			ID: "test-org-id", Type: models.WorkspaceTypeOrg, Name: "Acme", Role: models.OrgRoleMember, Plan: "ENTERPRISE",
+			MonitorsUsed: 47, MaxMonitors: 200,
 		}, got.Workspaces[1])
+	})
+
+	t.Run("an org owner's two workspaces share one pooled count", func(t *testing.T) {
+		owner := aMembership()
+		owner.Role = models.OrgRoleOwner
+		store := &mockStore{
+			orgsResult:       []models.Organization{{ID: "test-org-id", Name: "Acme", OwnerID: testUserID}},
+			membershipResult: owner,
+			subResult:        aSubscription("ENTERPRISE"),
+			monitorCount:     150,
+		}
+		got := get(t, store)
+
+		require.Len(t, got.Workspaces, 2)
+		// Personal monitors and org monitors draw on the same 200, so both
+		// workspaces report the same usage — that is the whole point.
+		assert.Equal(t, 150, got.Workspaces[0].MonitorsUsed)
+		assert.Equal(t, 150, got.Workspaces[1].MonitorsUsed)
+		assert.Equal(t, 200, got.Workspaces[0].MaxMonitors)
+		assert.Equal(t, 200, got.Workspaces[1].MaxMonitors)
+		// And the org side is not a second query against the org id.
+		assert.Equal(t, testUserID, store.lastCountOwnerID)
+	})
+
+	t.Run("a free account reports the free cap", func(t *testing.T) {
+		got := get(t, &mockStore{monitorCount: 3})
+
+		require.Len(t, got.Workspaces, 1)
+		assert.Equal(t, 3, got.Workspaces[0].MonitorsUsed)
+		assert.Equal(t, 5, got.Workspaces[0].MaxMonitors)
 	})
 
 	t.Run("email lookup failure returns 500", func(t *testing.T) {

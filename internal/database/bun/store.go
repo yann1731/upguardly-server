@@ -61,54 +61,91 @@ func ownerPlanExpr(alias string) string {
 const monitorAccessClause = `((org_id IS NULL AND user_id = ?)
 	OR org_id IN (SELECT organization_id FROM organization_members WHERE user_id = ?))`
 
-func (s *BunStore) CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, enabled bool, regions []string) (*models.Monitor, error) {
+// billingScopeClause scopes monitors to the ones billed to a single user: their
+// personal monitors plus every monitor in an org they own. This is the pool a
+// plan's MaxMonitors covers, and the same set a subscription change reconciles
+// (ReconcileMonitorsToPlan). Distinct from monitorAccessClause, which is about
+// who may *see* a monitor: an org member reaches the org's monitors but doesn't
+// pay for them. Bind the billing owner's id twice.
+const billingScopeClause = `((user_id = ? AND org_id IS NULL)
+	OR org_id IN (SELECT id FROM organizations WHERE owner_id = ?))`
+
+func (s *BunStore) CreateMonitor(ctx context.Context, p models.CreateMonitorParams) (*models.Monitor, error) {
 	var orgIDPtr *string
-	if orgId != "" {
-		orgIDPtr = &orgId
+	if p.OrgID != "" {
+		orgIDPtr = &p.OrgID
 	}
 	m := &Monitor{
 		ID:                      uuid.NewString(),
-		UserID:                  userId,
+		UserID:                  p.UserID,
 		OrgID:                   orgIDPtr,
-		Name:                    name,
-		Type:                    monitorType,
-		Target:                  target,
-		Interval:                interval,
-		Timeout:                 timeout,
-		DegradedThresholdMs:     degradedThresholdMs,
-		RepeatAlertIntervalSecs: repeatIntervalSecs,
-		RepeatAlertMaxCount:     repeatMaxCount,
-		Enabled:                 enabled,
-		Regions:                 regions,
+		Name:                    p.Name,
+		Type:                    p.Type,
+		Target:                  p.Target,
+		Interval:                p.Interval,
+		Timeout:                 p.Timeout,
+		DegradedThresholdMs:     p.DegradedThresholdMs,
+		RepeatAlertIntervalSecs: p.RepeatAlertIntervalSecs,
+		RepeatAlertMaxCount:     p.RepeatAlertMaxCount,
+		Enabled:                 p.Enabled,
+		Regions:                 p.Regions,
 		UpdatedAt:               time.Now(),
 	}
-	if err := s.client.DB.NewInsert().Model(m).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
+
+	err := s.client.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		// Authoritative quota check, in the same transaction as the insert so
+		// concurrent creates can't overshoot the cap between the two. No row is
+		// guaranteed to exist for the billing owner to lock — a FREE user has
+		// no subscriptions row — so serialize on an advisory lock keyed by the
+		// owner, the idiom the maintenance functions already use. Keyed on the
+		// owner and not the workspace: personal and org creates draw on one
+		// pool.
+		if p.MaxMonitors != models.Unlimited {
+			if _, err := tx.NewRaw(
+				"SELECT pg_advisory_xact_lock(hashtextextended('monitor_quota:' || ?, 0))",
+				p.BillingOwnerID,
+			).Exec(ctx); err != nil {
+				return err
+			}
+
+			var count int
+			if err := tx.NewRaw(
+				"SELECT count(*) FROM monitors WHERE "+billingScopeClause,
+				p.BillingOwnerID, p.BillingOwnerID,
+			).Scan(ctx, &count); err != nil {
+				return err
+			}
+			if count >= p.MaxMonitors {
+				return models.ErrMonitorLimit
+			}
+		}
+
+		if err := tx.NewInsert().Model(m).ExcludeColumn("created_at").Returning("*").Scan(ctx); err != nil {
+			return err
+		}
+		// Returning("*") doesn't include the computed owner_plan; resolve it so
+		// the API response shows the correct effective interval for follow-plan
+		// monitors.
+		return tx.NewRaw(
+			"SELECT "+ownerPlanExpr("monitors")+" FROM monitors WHERE id = ?", m.ID,
+		).Scan(ctx, &m.OwnerPlan)
+	})
+	if err != nil {
 		return nil, mapError(err)
 	}
-	// Returning("*") doesn't include the computed owner_plan; resolve it so the
-	// API response shows the correct effective interval for follow-plan monitors.
-	if err := s.client.DB.NewRaw(
-		"SELECT "+ownerPlanExpr("monitors")+" FROM monitors WHERE id = ?", m.ID,
-	).Scan(ctx, &m.OwnerPlan); err != nil {
-		return nil, mapError(err)
-	}
+
 	model := m.toModel()
 	return &model, nil
 }
 
-func (s *BunStore) CountMonitorsByOrg(ctx context.Context, orgId string) (int, error) {
+// CountMonitorsForBillingOwner counts the monitors drawing on one user's plan:
+// their personal monitors plus every monitor in an org they own. Used to report
+// usage on GET /me; the create path enforces the same scope inside its own
+// transaction rather than counting here first.
+func (s *BunStore) CountMonitorsForBillingOwner(ctx context.Context, ownerId string) (int, error) {
 	count, err := s.client.DB.NewSelect().
 		Model((*Monitor)(nil)).
-		Where("org_id = ?", orgId).
-		Count(ctx)
-	return count, mapError(err)
-}
-
-func (s *BunStore) CountMonitorsByUser(ctx context.Context, userId string) (int, error) {
-	count, err := s.client.DB.NewSelect().
-		Model((*Monitor)(nil)).
-		Where("user_id = ?", userId).
-		Where("org_id IS NULL").
+		Where(billingScopeClause, ownerId, ownerId).
 		Count(ctx)
 	return count, mapError(err)
 }
@@ -1448,7 +1485,7 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 	newLimits := models.LimitsForPlan(newPlan)
 	total := 0
 
-	planScopeSQL := `((user_id = ? AND org_id IS NULL) OR org_id IN (SELECT id FROM organizations WHERE owner_id = ?))`
+	planScopeSQL := billingScopeClause
 
 	// Follow-plan monitors (interval IS NULL) re-resolve their interval at read
 	// time, so a plan change needs no write for them — the upgrade re-grant is
@@ -1489,6 +1526,9 @@ func (s *BunStore) ReconcileMonitorsToPlan(ctx context.Context, userId, oldPlan,
 		total += int(rows)
 
 		if rows > 0 {
+			// billingScopeClause with every column qualified: this statement
+			// joins USING monitors m, so the unqualified const doesn't fit.
+			// Keep the two predicates in step.
 			deleteQuery := `DELETE FROM monitor_region_status mrs
 				  USING monitors m
 				  WHERE mrs.monitor_id = m.id
