@@ -123,6 +123,42 @@ type CreateMonitorRequest struct {
 	Regions []string `json:"regions"`
 }
 
+// CreateMonitorParams is the store-level shape of a monitor insert. It carries
+// the resolved billing context alongside the monitor's own fields so the store
+// can enforce the quota in the same transaction as the insert: BillingOwnerID
+// is whoever's subscription governs the workspace (the caller for a personal
+// monitor, the org owner for an org one) and MaxMonitors is that plan's cap.
+type CreateMonitorParams struct {
+	// UserID is the creator. It is the owner of a personal monitor
+	// (OrgID empty); on an org monitor it records who created it and carries
+	// no standing of its own.
+	UserID string
+	OrgID  string
+
+	// BillingOwnerID is the user whose monitor pool this create consumes, and
+	// MaxMonitors is that pool's cap — Unlimited disables the check. The two
+	// are always resolved together; see handlers.billingOwner.
+	BillingOwnerID string
+	MaxMonitors    int
+
+	Name   string
+	Type   string
+	Target string
+	// Interval is nil for a follow-plan monitor (resolved to the plan minimum
+	// at read time), or an explicit override in seconds.
+	Interval *int
+	Timeout  int
+	// DegradedThresholdMs is nil for the per-type default slow-response
+	// threshold, or a plan-gated explicit override in milliseconds.
+	DegradedThresholdMs *int
+	// RepeatAlertIntervalSecs/RepeatAlertMaxCount enable repeat alerts
+	// (ENTERPRISE); both nil = off, always set together.
+	RepeatAlertIntervalSecs *int
+	RepeatAlertMaxCount     *int
+	Enabled                 bool
+	Regions                 []string
+}
+
 type UpdateMonitorRequest struct {
 	Name   *string      `json:"name"`
 	Type   *MonitorType `json:"type" binding:"omitempty,oneof=HTTP PORT PING"`

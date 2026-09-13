@@ -24,15 +24,18 @@ type mockStore struct {
 	monitorsErr     error
 	monitorCount    int
 	monitorCountErr error
-	resultsResult   []models.MonitorResult
-	resultsErr      error
-	incidentsResult []models.Incident
-	incidentsErr    error
-	statsResult     *models.MonitorStats
-	statsErr        error
-	uptimeResult    *models.MonitorUptime
-	uptimeErr       error
-	deleteErr       error
+	// monitorCountsByOwner overrides monitorCount per billing owner, so a test
+	// can give the caller and an org owner different pools.
+	monitorCountsByOwner map[string]int
+	resultsResult        []models.MonitorResult
+	resultsErr           error
+	incidentsResult      []models.Incident
+	incidentsErr         error
+	statsResult          *models.MonitorStats
+	statsErr             error
+	uptimeResult         *models.MonitorUptime
+	uptimeErr            error
+	deleteErr            error
 
 	// notification channel return values
 	channelResult         *models.NotificationChannel
@@ -101,6 +104,7 @@ type mockStore struct {
 	lastUptimeTZOffsetMinutes   int
 	lastUpsertSub               *models.UpsertSubscriptionParams
 	deleteOrgCalled             bool
+	lastCreateParams            *models.CreateMonitorParams
 	lastCreateInterval          *int
 	lastCreateDegradedThreshold *int
 	lastCreateRepeatInterval    *int
@@ -117,6 +121,7 @@ type mockStore struct {
 	lastRecipientTarget         string
 	lastAcceptMaxSeats          int
 	lastListOrgID               *string
+	lastCountOwnerID            string
 }
 
 // reconcileCall captures one ReconcileMonitorsToPlan invocation.
@@ -126,19 +131,33 @@ type reconcileCall struct {
 	NewPlan string
 }
 
-func (m *mockStore) CreateMonitor(_ context.Context, _, _, _, _, _ string, interval *int, _ int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, _ bool, regions []string) (*models.Monitor, error) {
-	m.lastCreateInterval = interval
-	m.lastCreateDegradedThreshold = degradedThresholdMs
-	m.lastCreateRepeatInterval = repeatIntervalSecs
-	m.lastCreateRepeatCount = repeatMaxCount
-	m.lastCreateRegions = regions
+func (m *mockStore) CreateMonitor(_ context.Context, p models.CreateMonitorParams) (*models.Monitor, error) {
+	m.lastCreateParams = &p
+	m.lastCreateInterval = p.Interval
+	m.lastCreateDegradedThreshold = p.DegradedThresholdMs
+	m.lastCreateRepeatInterval = p.RepeatAlertIntervalSecs
+	m.lastCreateRepeatCount = p.RepeatAlertMaxCount
+	m.lastCreateRegions = p.Regions
+	// The real store enforces the quota inside the insert's transaction; mirror
+	// that here so handler tests exercise the sentinel → 402 mapping.
+	if m.monitorErr == nil && p.MaxMonitors != models.Unlimited && m.countFor(p.BillingOwnerID) >= p.MaxMonitors {
+		return nil, models.ErrMonitorLimit
+	}
 	return m.monitorResult, m.monitorErr
 }
-func (m *mockStore) CountMonitorsByOrg(_ context.Context, _ string) (int, error) {
-	return m.monitorCount, m.monitorCountErr
+
+// countFor is the pooled monitor count for one billing owner: a per-owner
+// override when the test set one, else the flat monitorCount.
+func (m *mockStore) countFor(ownerId string) int {
+	if n, ok := m.monitorCountsByOwner[ownerId]; ok {
+		return n
+	}
+	return m.monitorCount
 }
-func (m *mockStore) CountMonitorsByUser(_ context.Context, _ string) (int, error) {
-	return m.monitorCount, m.monitorCountErr
+
+func (m *mockStore) CountMonitorsForBillingOwner(_ context.Context, ownerId string) (int, error) {
+	m.lastCountOwnerID = ownerId
+	return m.countFor(ownerId), m.monitorCountErr
 }
 func (m *mockStore) ListMonitors(_ context.Context, _, orgId string) ([]models.Monitor, error) {
 	m.lastListOrgID = &orgId

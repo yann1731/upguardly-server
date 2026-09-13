@@ -27,7 +27,7 @@ func TestCreatePathsPopulateGeneratedColumns(t *testing.T) {
 	user := "create-" + uuid.NewString()
 
 	t.Run("monitor", func(t *testing.T) {
-		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, nil, nil, nil, true, []string{"ca-east"})
+		m, err := s.CreateMonitor(ctx, newMonitorParams(user, "", "mon-"+uuid.NewString()[:8]))
 		if err != nil {
 			t.Fatalf("CreateMonitor: %v", err)
 		}
@@ -158,7 +158,9 @@ func TestCreatePathsPersistFalseBooleans(t *testing.T) {
 	user := "falsebool-" + uuid.NewString()
 
 	t.Run("monitor created paused", func(t *testing.T) {
-		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, nil, nil, nil, false, []string{"ca-east"})
+		p := newMonitorParams(user, "", "mon-"+uuid.NewString()[:8])
+		p.Enabled = false
+		m, err := s.CreateMonitor(ctx, p)
 		if err != nil {
 			t.Fatalf("CreateMonitor: %v", err)
 		}
@@ -192,7 +194,7 @@ func TestCreatePathsPersistFalseBooleans(t *testing.T) {
 	})
 
 	t.Run("monitor channel setting opting out", func(t *testing.T) {
-		m, err := s.CreateMonitor(ctx, user, "", "mon-"+uuid.NewString()[:8], "HTTP", "http://93.184.216.34", nil, 30, nil, nil, nil, true, []string{"ca-east"})
+		m, err := s.CreateMonitor(ctx, newMonitorParams(user, "", "mon-"+uuid.NewString()[:8]))
 		if err != nil {
 			t.Fatalf("CreateMonitor: %v", err)
 		}

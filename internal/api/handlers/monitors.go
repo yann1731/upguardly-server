@@ -62,43 +62,24 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		orgID, role = req.OrgID, membership.Role
 	}
 
-	// Resolve the plan and current monitor count for that workspace: a solo
-	// monitor is governed by the user's own plan, an org monitor by the org
-	// owner's.
-	var plan string
-	var count int
-	if orgID == "" {
-		plan = h.planForUser(c.Request.Context(), userId)
-		n, err := h.store.CountMonitorsByUser(c.Request.Context(), userId)
-		if err != nil {
-			log.Printf("monitors: count monitors for user %s: %v", userId, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
-			return
-		}
-		count = n
-	} else {
-		if !models.RoleAtLeast(role, models.OrgRoleMember) {
-			respondOrgRoleForbidden(c)
-			return
-		}
-		plan = h.planForOrg(c.Request.Context(), orgID)
-		n, err := h.store.CountMonitorsByOrg(c.Request.Context(), orgID)
-		if err != nil {
-			log.Printf("monitors: count monitors for org %s: %v", orgID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
-			return
-		}
-		count = n
-	}
-
-	// Enforce the resolved plan's limit on the number of monitors.
-	limits := models.LimitsForPlan(plan)
-	if limits.MaxMonitors != models.Unlimited && count >= limits.MaxMonitors {
-		c.JSON(http.StatusPaymentRequired, gin.H{
-			"error": fmt.Sprintf("Monitor limit reached for your plan (%d). Upgrade to add more.", limits.MaxMonitors),
-		})
+	// Org VIEWERs are read-only. This has to come before the billing lookup
+	// below: refusing a viewer must not depend on the org loading.
+	if orgID != "" && !models.RoleAtLeast(role, models.OrgRoleMember) {
+		respondOrgRoleForbidden(c)
 		return
 	}
+
+	// Resolve who pays for this workspace and what their plan allows. The cap
+	// is one pool per billing owner covering their personal monitors and every
+	// monitor in an org they own, so it isn't counted here — CreateMonitor
+	// checks it inside the insert's transaction and returns ErrMonitorLimit.
+	owner, err := h.billingOwner(c.Request.Context(), userId, orgID)
+	if err != nil {
+		log.Printf("monitors: resolve billing owner for user %s (org %q): %v", userId, orgID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check monitor quota"})
+		return
+	}
+	limits := models.LimitsForPlan(h.planForUser(c.Request.Context(), owner))
 
 	// Regions: default to the platform default, then validate against the
 	// registry, the deployed set, and the plan's region cap.
@@ -193,7 +174,28 @@ func (h *Handlers) CreateMonitor(c *gin.Context) {
 		}
 	}
 
-	m, err := h.store.CreateMonitor(c.Request.Context(), userId, orgID, req.Name, string(req.Type), req.Target, intervalArg, req.Timeout, degradedThresholdArg, repeatIntervalArg, repeatCountArg, *req.Enabled, req.Regions)
+	m, err := h.store.CreateMonitor(c.Request.Context(), models.CreateMonitorParams{
+		UserID:                  userId,
+		OrgID:                   orgID,
+		BillingOwnerID:          owner,
+		MaxMonitors:             limits.MaxMonitors,
+		Name:                    req.Name,
+		Type:                    string(req.Type),
+		Target:                  req.Target,
+		Interval:                intervalArg,
+		Timeout:                 req.Timeout,
+		DegradedThresholdMs:     degradedThresholdArg,
+		RepeatAlertIntervalSecs: repeatIntervalArg,
+		RepeatAlertMaxCount:     repeatCountArg,
+		Enabled:                 *req.Enabled,
+		Regions:                 req.Regions,
+	})
+	if errors.Is(err, models.ErrMonitorLimit) {
+		c.JSON(http.StatusPaymentRequired, gin.H{
+			"error": fmt.Sprintf("Monitor limit reached for your plan (%d). The limit is shared across your personal workspace and your organization. Upgrade to add more.", limits.MaxMonitors),
+		})
+		return
+	}
 	if err != nil {
 		log.Printf("monitors: create monitor for user %s (org %q, type %s, regions %v): %v", userId, orgID, req.Type, req.Regions, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create monitor"})

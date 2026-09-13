@@ -47,6 +47,16 @@ func aMembership() *models.OrganizationMember {
 	}
 }
 
+// anOrg is the test org, owned by the calling user — so the caller is its
+// billing owner and the two workspaces share one monitor pool.
+func anOrg() *models.Organization {
+	return &models.Organization{
+		ID:      "test-org-id",
+		Name:    "Test Org",
+		OwnerID: testUserID,
+	}
+}
+
 func aSubscription(plan string) *models.Subscription {
 	return &models.Subscription{
 		ID:     "sub-1",

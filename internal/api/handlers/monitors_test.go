@@ -13,7 +13,11 @@ import (
 
 func TestCreateMonitor(t *testing.T) {
 	t.Run("valid body returns 201 with monitor", func(t *testing.T) {
-		store := &mockStore{monitorResult: aMonitor(), membershipResult: aMembership()}
+		store := &mockStore{
+			monitorResult:    aMonitor(),
+			membershipResult: aMembership(),
+			orgResult:        anOrg(),
+		}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
@@ -116,8 +120,8 @@ func TestCreateMonitor(t *testing.T) {
 	})
 
 	t.Run("monitor limit reached returns 402", func(t *testing.T) {
-		// FREE plan caps at 5 monitors; org already has 5.
-		store := &mockStore{membershipResult: aMembership(), monitorCount: 5}
+		// FREE plan caps at 5 monitors; the owner's pool already holds 5.
+		store := &mockStore{membershipResult: aMembership(), orgResult: anOrg(), monitorCount: 5}
 		router, h := newTestRouter(store)
 		router.POST("/v1/monitors", h.CreateMonitor)
 
@@ -132,7 +136,7 @@ func TestCreateMonitor(t *testing.T) {
 		store := &mockStore{
 			monitorResult:    aMonitor(),
 			membershipResult: aMembership(),
-			orgResult:        &models.Organization{ID: "test-org-id", OwnerID: testUserID},
+			orgResult:        anOrg(),
 			subResult:        aSubscription("PRO"),
 			monitorCount:     6,
 		}

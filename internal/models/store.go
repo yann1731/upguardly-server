@@ -17,16 +17,21 @@ var ErrConflict = errors.New("conflict")
 // AcceptInvitation; CreateInvitation pre-checks the same rule in the handler).
 var ErrSeatLimit = errors.New("seat limit reached")
 
+// ErrMonitorLimit is returned when creating a monitor would push a billing
+// owner past their plan's MaxMonitors. The cap is one pool covering their
+// personal monitors and every monitor in an org they own, and it is checked
+// transactionally inside CreateMonitor.
+var ErrMonitorLimit = errors.New("monitor limit reached")
+
 type Store interface {
-	// Monitors. interval is nil for a follow-plan monitor (resolved to the
-	// plan minimum at read time), or an explicit override in seconds.
-	// degradedThresholdMs is nil for the per-type default slow-response
-	// threshold, or a plan-gated explicit override in milliseconds.
-	// repeatIntervalSecs/repeatMaxCount enable repeat alerts (ENTERPRISE);
-	// both nil = off, always set together.
-	CreateMonitor(ctx context.Context, userId, orgId, name, monitorType, target string, interval *int, timeout int, degradedThresholdMs, repeatIntervalSecs, repeatMaxCount *int, enabled bool, regions []string) (*Monitor, error)
-	CountMonitorsByOrg(ctx context.Context, orgId string) (int, error)
-	CountMonitorsByUser(ctx context.Context, userId string) (int, error)
+	// CreateMonitor inserts a monitor and enforces the billing owner's
+	// MaxMonitors in the same transaction, returning ErrMonitorLimit when the
+	// pool is full. See CreateMonitorParams.
+	CreateMonitor(ctx context.Context, p CreateMonitorParams) (*Monitor, error)
+	// CountMonitorsForBillingOwner counts the monitors billed to one user:
+	// their personal monitors plus every monitor in an org they own. This is
+	// the pool a plan's MaxMonitors covers.
+	CountMonitorsForBillingOwner(ctx context.Context, ownerId string) (int, error)
 	// ListMonitors lists one workspace's monitors: the user's solo monitors
 	// when orgId is empty, else the org's (membership is checked by the
 	// caller).
