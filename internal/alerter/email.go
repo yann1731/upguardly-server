@@ -9,6 +9,7 @@ import (
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
 	"upguardly-backend/internal/config"
+	"upguardly-backend/internal/mailer"
 	"upguardly-backend/internal/models"
 )
 
@@ -36,6 +37,22 @@ func (a *EmailAlerter) Send(ctx context.Context, target string, monitor *models.
 		return fmt.Errorf("recipient email not set")
 	}
 
+	message := a.buildMessage(target, monitor, result)
+
+	client := sendgrid.NewSendClient(a.config.APIKey)
+	resp, err := client.SendWithContext(ctx, message)
+	if err != nil {
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("SendGrid returned status %d: %s", resp.StatusCode, resp.Body)
+	}
+
+	return nil
+}
+
+func (a *EmailAlerter) buildMessage(target string, monitor *models.Monitor, result *models.CheckResult) *mail.SGMailV3 {
 	subject := fmt.Sprintf("Upguardly Alert: %s is %s", monitor.Name, result.Status)
 	body := fmt.Sprintf(`Monitor Alert
 
@@ -53,16 +70,6 @@ Sent by Upguardly Monitoring
 	from := mail.NewEmail(a.config.FromName, a.config.From)
 	to := mail.NewEmail("", target)
 	message := mail.NewSingleEmail(from, subject, to, body, "")
-
-	client := sendgrid.NewSendClient(a.config.APIKey)
-	resp, err := client.SendWithContext(ctx, message)
-	if err != nil {
-		return fmt.Errorf("failed to send email: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("SendGrid returned status %d: %s", resp.StatusCode, resp.Body)
-	}
-
-	return nil
+	mailer.DisableClickTracking(message)
+	return message
 }

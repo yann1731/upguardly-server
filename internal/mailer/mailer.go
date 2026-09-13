@@ -29,11 +29,13 @@ func (m *Mailer) dryRun(kind, to, link string) bool {
 	return true
 }
 
-// disableClickTracking turns off SendGrid's link rewriting for a message. These
-// are transactional emails whose links carry single-use tokens; routing them
-// through SendGrid's click-tracking redirector mangles the tokens and breaks
-// localhost links in dev, so we always send the links verbatim.
-func disableClickTracking(message *mail.SGMailV3) {
+// DisableClickTracking turns off SendGrid's link rewriting for a message. These
+// are transactional emails whose links carry single-use tokens or, for monitor
+// alerts, the monitored target itself; routing them through SendGrid's
+// click-tracking redirector (urlNNNN.upguardly.com) mangles the tokens, hides
+// the real target and breaks localhost links in dev, so we always send the
+// links verbatim.
+func DisableClickTracking(message *mail.SGMailV3) {
 	ct := mail.NewClickTrackingSetting()
 	ct.SetEnable(false)
 	ct.SetEnableText(false)
@@ -70,7 +72,7 @@ Upguardly
 	from := mail.NewEmail(m.cfg.FromName, m.cfg.From)
 	recipient := mail.NewEmail("", to)
 	message := mail.NewSingleEmail(from, subject, recipient, body, "")
-	disableClickTracking(message)
+	DisableClickTracking(message)
 
 	client := sendgrid.NewSendClient(m.cfg.APIKey)
 	resp, err := client.Send(message)
@@ -110,7 +112,7 @@ Upguardly
 	from := mail.NewEmail(m.cfg.FromName, m.cfg.From)
 	recipient := mail.NewEmail("", to)
 	message := mail.NewSingleEmail(from, subject, recipient, body, "")
-	disableClickTracking(message)
+	DisableClickTracking(message)
 
 	client := sendgrid.NewSendClient(m.cfg.APIKey)
 	resp, err := client.Send(message)
@@ -148,7 +150,7 @@ Upguardly
 	from := mail.NewEmail(m.cfg.FromName, m.cfg.From)
 	recipient := mail.NewEmail("", to)
 	message := mail.NewSingleEmail(from, subject, recipient, body, "")
-	disableClickTracking(message)
+	DisableClickTracking(message)
 
 	client := sendgrid.NewSendClient(m.cfg.APIKey)
 	resp, err := client.Send(message)
